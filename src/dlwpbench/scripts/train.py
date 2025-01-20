@@ -11,7 +11,6 @@ import threading
 import hydra
 import numpy as np
 import torch as th
-import torch.utils.tensorboard as tb
 
 sys.path.append("")
 from data.datasets import *
@@ -33,7 +32,7 @@ def run_training(cfg):
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
 
-    wandb.init(project="dlwp-benchmark", config=cfg)
+    wandb.init(project="dlwp-benchmark") 
 
     if cfg.verbose: print("\nInitializing model")
 
@@ -73,6 +72,8 @@ def run_training(cfg):
     
     if cfg.verbose: print("\nInitializing datasets")
 
+    print("DATA", cfg.data)
+
     # Initializing dataloaders for training and validation
     train_dataset = hydra.utils.instantiate(
         cfg.data,
@@ -80,6 +81,8 @@ def run_training(cfg):
         stop_date=cfg.data.train_stop_date,
         sequence_length=cfg.training.sequence_length
     )
+    print("Train dataset")
+    print(train_dataset)
     val_dataset = hydra.utils.instantiate(
         cfg.data,
         start_date=cfg.data.val_start_date,
@@ -118,7 +121,8 @@ def run_training(cfg):
             prescribed = prescribed.to(device=device).split(split_size) if not prescribed.isnan().any() else None
             prognostic = prognostic.to(device=device).split(split_size)
             target = target.to(device=device).split(split_size)
-
+            
+            
             # Perform optimization step and record outputs
             optimizer.zero_grad()
             for accum_idx in range(len(prognostic)):
