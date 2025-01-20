@@ -17,7 +17,7 @@ sys.path.append("")
 from data.datasets import *
 from models import *
 import utils.utils as utils
-
+import wandb
 
 @hydra.main(config_path='../configs/', config_name='config', version_base=None)
 def run_training(cfg):
@@ -32,6 +32,8 @@ def run_training(cfg):
         np.random.seed(cfg.seed)
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
+
+    wandb.init(project="dlwp-benchmark", config=cfg)
 
     if cfg.verbose: print("\nInitializing model")
 
@@ -68,9 +70,7 @@ def run_training(cfg):
     # Write the model configurations to the model save path
     os.makedirs(os.path.join("outputs", cfg.model.name), exist_ok=True)
 
-    # Initialize tensorbaord to track scalars
-    writer = tb.SummaryWriter(log_dir=os.path.join("outputs", cfg.model.name, "tensorboard"))
-
+    
     if cfg.verbose: print("\nInitializing datasets")
 
     # Initializing dataloaders for training and validation
@@ -103,10 +103,8 @@ def run_training(cfg):
     if cfg.verbose: print("\nStart training. Inspect progress via 'tensorboard --logdir outputs'")
     for epoch in range(epoch, cfg.training.epochs):
 
-        # Track epoch and learning rate in tensorboard
-        writer.add_scalar(tag="Epoch", scalar_value=epoch, global_step=iteration)
-        writer.add_scalar(tag="Learning Rate", scalar_value=optimizer.state_dict()["param_groups"][0]["lr"],
-                          global_step=iteration)
+        wandb.log({"Epoch": epoch, "Learning Rate": optimizer.state_dict()["param_groups"][0]["lr"]}, step=iteration)
+
 
         start_time = time.time()
 
@@ -137,7 +135,8 @@ def run_training(cfg):
                 outputs.append(output.detach().cpu())
                 targets.append(target[accum_idx].detach().cpu())
             optimizer.step()
-            writer.add_scalar(tag="MSE/training", scalar_value=train_loss, global_step=iteration)
+            wandb.log({"MSE/training": train_loss}, step=iteration)
+            # writer.add_scalar(tag="MSE/training", scalar_value=train_loss, global_step=iteration)
             iteration += 1
         with th.no_grad(): epoch_train_loss = criterion(th.cat(outputs), th.cat(targets)).numpy()
 
@@ -160,7 +159,9 @@ def run_training(cfg):
                     outputs.append(output.cpu())
                     targets.append(target[accum_idx].cpu())
             epoch_val_loss = criterion(th.cat(outputs), th.cat(targets)).numpy()
-        writer.add_scalar(tag="MSE/validation", scalar_value=epoch_val_loss, global_step=iteration)
+
+        wandb.log({"MSE/validation": epoch_val_loss}, step=iteration)
+       
 
         # Write model checkpoint to file, using a separate thread
         if cfg.training.save_model:
@@ -174,6 +175,20 @@ def run_training(cfg):
                 args=(model, optimizer, scheduler, epoch, iteration, best_val_error, dst_path, ))
             thread.start()
 
+            # Log checkpoint information with wandb
+            wandb.log({
+                "checkpoint_saved": True,
+                "checkpoint_path": dst_path,
+                "best_val_error": best_val_error,
+                "epoch": epoch,
+                "iteration": iteration
+            }, step=iteration)
+
+            # Create and log a wandb Artifact
+            artifact = wandb.Artifact(f"model_checkpoint_epoch_{epoch}", type="model")
+            artifact.add_file(dst_path)
+            wandb.log_artifact(artifact)
+
         # Print training progress to console
         if cfg.verbose:
             epoch_time = round(time.time() - start_time, 2)
@@ -185,10 +200,7 @@ def run_training(cfg):
         # Update learning rate
         scheduler.step()
 
-    # Wrap up
-    try: thread.join(); writer.flush(); writer.close()
-    except NameError: pass
-
+  
 
 if __name__ == "__main__":
     run_training()
