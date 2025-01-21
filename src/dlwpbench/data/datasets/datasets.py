@@ -203,15 +203,18 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             }
         },
         'msl': {"file_name": "msl",
-            "mean": 100913.40914241452,
-"std": 1396.3364187305049},
+            "mean": 100958.9342887361,
+"std": 1302.149826386961},
         'sst': {"file_name": "sst",
             "mean": 290.31263675008245,
 "std": 11.372437606024592}
         ,
         'stream': {"file_name": "stream500",
-            "mean": 1749033.8657158152,
-"std": 44270348.998255245}
+            "mean": 2355273.207031221,
+"std": 42371255.252134465},
+'stream250': {"file_name": "stream250",
+           "mean": 3279301.066678744,
+"std": 88087550.26655602}
         ,
         "tisr": {
             "file_name": "toa_incident_solar_radiation",
