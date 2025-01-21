@@ -202,6 +202,17 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                 1000: {"mean": 6.151589104774757e-08, "std": 3.8373880670405924e-05}
             }
         },
+        'msl': {"file_name": "msl",
+            "mean": 100913.40914241452,
+"std": 1396.3364187305049},
+        'sst': {"file_name": "sst",
+            "mean": 290.31263675008245,
+"std": 11.372437606024592}
+        ,
+        'stream': {"file_name": "stream500",
+            "mean": 1749033.8657158152,
+"std": 44270348.998255245}
+        ,
         "tisr": {
             "file_name": "toa_incident_solar_radiation",
             "mean": 1074504.8,
@@ -238,7 +249,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             self,
             data_path: str,
             prognostic_variable_names_and_levels: dict,
-            prescribed_variable_names: list = None,
+            prescribed_variable_names: list = [],
             constant_names: list = None,
             start_date: np.datetime64 = np.datetime64("1979-01-01"),
             stop_date: np.datetime64 = np.datetime64("2014-12-31"),
@@ -248,7 +259,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             noise: float = 0.0,
             normalize: bool = False,
             downscale_factor: int = 1,
-            context_size: int = 1,
+            context_size: int = 2,
             engine: str = "netcdf4",
             height: int = 32,
             width: int = 64,
@@ -265,6 +276,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         :param data_src_path: The source path of the data
         :param sequence_length: The number of time steps used for training
         """
+               
 
         self.stats = WeatherBenchDataset.STATISTICS
         self.prognostic_variable_names_and_levels = prognostic_variable_names_and_levels
@@ -291,8 +303,9 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         print(f"\tLoading dataset from {start_date} to {stop_date} into RAM...", sep=" ", end=" ", flush=True)
         a = time.time()
         # Load the data as xarray dataset
+        
         self.ds = xr.open_mfdataset(fpaths, engine=engine).sel(time=slice(start_date, stop_date, timedelta))
-
+        
         # Chunk and load dataset to memory (distinguish between HEALPix, i.e., when "face" in coords, and LatLon mesh)
         if "face" in self.ds.coords:
             chunkdict = dict(time=self.sequence_length+1, face=12, height=height, width=width)
@@ -300,7 +313,9 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             chunkdict = dict(time=self.sequence_length+1, lat=height, lon=width)
         self.ds = self.ds.chunk(chunkdict).load()
         print(f"took {time.time() - a} seconds")
-
+        print("dataset")
+        print(self.ds.time)
+        
         # Downscale dataset if desired
         if downscale_factor > 1:
             assert "face" not in self.ds.coords, "Downscaling only supported with LatLon and not with HEALPix data."
@@ -316,6 +331,10 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             self.constants = np.expand_dims(np.float32(np.stack(constants)), axis=0)
         else:
             self.constants = th.nan  # Dummy tensor is returned if no constants are used
+
+        print('context size', self.context_size)
+        print('statistics on dataset')
+        print(self.compute_statistics())
         
     def __len__(self):
         if self.init_dates is None:
@@ -339,12 +358,17 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                 manual_tisr = False
                 if self.init_dates is None:
                     lazy_data = self.ds[p].isel(time=slice(item, item+self.sequence_length))
+                    
                 else:
                     lazy_data = self.ds[p].sel(
                         time=slice(self.init_dates[item],
                                    self.init_dates[item]+pd.Timedelta(f"{self.sequence_length*self.timedelta}h"))
+                    
                     )
+                #print("lazy data time - input vector from dataloader")   
+                #print(lazy_data.time)
                 if self.init_dates is not None and self.sequence_length > len(lazy_data.time):
+                    print("MANUAL TISR")
                     # Augment TISR with values from 2017 when exceeding the date of the stored data
                     manual_tisr = True
                     diff = self.sequence_length - len(lazy_data.time)
@@ -368,7 +392,9 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         prognostic = []
         for p in self.prognostic_variable_names_and_levels:
             if self.init_dates is None:
-                lazy_data = self.ds[p].isel(time=slice(item, item+self.sequence_length+1))
+                lazy_data = self.ds[p].isel(time=slice(item, item+self.sequence_length+1)) # loads one more time step (output)
+                # print("lazy data time (prognostic) - input vector from dataloader")   
+                # print(lazy_data.time)
             else:
                 lazy_data = self.ds[p].sel(
                     time=slice(self.init_dates[item],
@@ -380,21 +406,30 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                     lazy_data_l = lazy_data.sel(level=l)
                     if self.normalize:
                         lazy_data_l = (lazy_data_l-self.stats[p]["level"][l]["mean"])/self.stats[p]["level"][l]["std"]
+                        lazy_data_l = lazy_data_l.fillna(0)
                     prognostic.append(lazy_data_l.compute())
             else:
                 if self.normalize: lazy_data = (lazy_data-self.stats[p]["mean"])/self.stats[p]["std"]
+                lazy_data = lazy_data.fillna(0)
                 prognostic.append(lazy_data.compute())
-        prognostic = np.float32(np.stack(prognostic, axis=1))
+        prognostic = np.float32(np.stack(prognostic, axis=1)) # stack along the time dimension
         # Append zeros to the prog. vars when exceeding the date of the stored data (required for long rollouts)
         if len(prognostic) < self.sequence_length:
             diff = self.sequence_length - len(prognostic)
             fill = np.zeros((diff, *prognostic.shape[1:]), dtype=np.float32)
             prognostic = np.concatenate((prognostic, fill), axis=0)
 
+        #print("len of prognostic?", len(prognostic))
+
         # Separate prognostic variables into inputs and targets
         target = prognostic[1:]
+        #print('shape of target initial', target.shape)
+        #print('shape of target', target[self.context_size:].shape)
+
         prognostic = prognostic[:-1] + np.float32(np.random.randn(*prognostic[:-1].shape)*self.noise)
 
+        #print("shape of prognostic", prognostic.shape)
+        
         return self.constants, prescribed, prognostic, target[self.context_size:]
 
     
@@ -436,7 +471,7 @@ if __name__ == "__main__":
             #"u10": [],   # 10m_u_component_of_wind
             #"v10": [],   # 10m_v_component_of_wind
             #"t2m": [],   # 2m_temperature
-            "z": [500],     # geopotential
+            #"z": [500],     # geopotential
             #"z500",  # geopotential_500
             #"pv": [500],    # potential_vorticity
             #"r": [500, 700],     # relative_humidity
@@ -446,22 +481,24 @@ if __name__ == "__main__":
             #"u": [500],     # u_component_of_wind
             #"v": [500],     # v_component_of_wind
             #"vo": [500]     # vorticity
+            'sst': []
         },
         prescribed_variable_names=[
-            #"tisr"   # top of atmosphere incoming solar radiation
+            "tisr"   # top of atmosphere incoming solar radiation
         ],
         constant_names=[
-            #"orography",
-            #"lsm",   # land-sea mask
+            "orography",
+            "lsm",   # land-sea mask
             #"slt",   # soil type
-            #"lat2d",
-            #"lon2d"
+            "lat2d",
+            "lon2d"
         ],
         sequence_length=15,
         noise=0.0,
         normalize=True,
         downscale_factor=None
     )
+    
 
     train_dataloader = th.utils.data.DataLoader(
         dataset=dataset,

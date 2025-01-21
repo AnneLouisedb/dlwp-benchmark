@@ -30,7 +30,7 @@ class UNet(th.nn.Module):
         self.context_size = context_size
         self.mesh = mesh
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
-
+        print("In channels UNet from initialization", in_channels)
         self.encoder = UNetEncoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
@@ -77,8 +77,14 @@ class UNet(th.nn.Module):
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
 
+        # print("prognostic shapes", prognostic.shape[1]) # number of time steps predicted (e.g output 2)
+        # print('context size', self.context_size)
+        # print('shape entire prognostic?', prognostic.shape)
+        # print('shape entire prescribed?', prescribed.shape)
+
         for t in range(self.context_size, prognostic.shape[1]):
-            
+            print("Predicting ahead Day:", t)
+          
             t_start = max(0, t-(self.context_size))
             if t == self.context_size:
                 # Initial condition
@@ -86,9 +92,10 @@ class UNet(th.nn.Module):
                 x_t = self._prepare_inputs(
                     constants=constants,
                     prescribed=prescribed[:, t_start:t] if prescribed is not None else None,
-                    prognostic=prognostic_t
+                    prognostic=prognostic_t # to forecast
                 )
             else:
+                
                 # In case of context_size > 1, blend prognostic input with outputs from previous time steps
                 prognostic_t = th.cat(
                     tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size
@@ -101,13 +108,17 @@ class UNet(th.nn.Module):
                     prognostic=prognostic_t
                 )
 
-            # Forward input through model
             enc = self.encoder(x_t)
-            out = self.decoder(x=enc[-1], skips=enc[::-1])
+            
+            out = self.decoder(x=enc[-1], skips=enc[::-1]) 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
             out = prognostic_t[:, -1] + out
+
+            
+
             outs.append(out)
-        
+
+       
         return th.stack(outs, dim=1)
 
 
