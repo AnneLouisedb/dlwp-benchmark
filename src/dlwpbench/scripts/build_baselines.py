@@ -33,7 +33,9 @@ def persistence_forecast(ds_inits: xr.Dataset, ds_outputs: xr.Dataset, ds_target
 	
 
 def climatology_forecast(ds_inits: xr.Dataset, ds_outputs: xr.Dataset, ds_targets: xr.Dataset):
+	"""Creating a monthly climatology."""
 	print("Creating climatology forecast...")
+
 	# Specs according to climatological standard normal from 1981 through 2010
 	# https://en.wikipedia.org/wiki/Climatological_normal
 	start_date = "1981-01-01"
@@ -72,7 +74,7 @@ def climatology_forecast(ds_inits: xr.Dataset, ds_outputs: xr.Dataset, ds_target
 
 if __name__ == "__main__":
 	# Specs
-	src_model_name = "clstm1m_cyl_4x57_v0"
+	src_model_name = "unet"
 	src_path = os.path.join("outputs", src_model_name, "evaluation")
 	
 	# Load data	

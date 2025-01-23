@@ -13,7 +13,7 @@ import threading
 import subprocess
 import multiprocessing
 from tqdm import tqdm
-
+import wandb
 import hydra
 import numpy as np
 import torch as th
@@ -21,6 +21,7 @@ import pandas as pd
 import xarray as xr
 from omegaconf import DictConfig
 from dask.diagnostics import ProgressBar
+import dask.array as da
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -54,16 +55,16 @@ MODEL_NAME_PLOT_ARGS = {
 
 
 def make_biweekly_inits(
-    start: str = "2017-01-01",
-    end: str = "2018-12-31",
-    sequence_length: int = 57,
-    timedelta: int = 6
+    start: str = "2017-01-01T11:00:00.000000000",
+    end: str = "2018-12-31T11:00:00.000000000",
+    sequence_length: int = 15,
+    timedelta: int = 24 #24 #6
 ):
     times1 = pd.date_range(start=start,
-                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta),
+                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
                            freq='7D')
     times2 = pd.date_range(start=pd.Timestamp(start) + pd.Timedelta(days=3),
-                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta),
+                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
                            freq='7D')
     return times1.append(times2).sort_values().to_numpy()
 
@@ -127,7 +128,6 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
 
-    #
     # Set up model
     model = eval(cfg.model.type)(**cfg.model).to(device=device)
     if cfg.verbose:
@@ -140,7 +140,6 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
     checkpoint = th.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    #
     # Initializing dataloader for testing
     init_dates = make_biweekly_inits(
             start=cfg.data.test_start_date,
@@ -161,13 +160,14 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
         )
         #if "hpx" in file_path: dataset_dict["hpx"] = dataset
         #else: dataset_dict["cyl"] = dataset
-
+    
     dataloader = th.utils.data.DataLoader(
         dataset=dataset,
         batch_size=cfg.testing.batch_size,
         shuffle=False,
         num_workers=0
     )
+    print("loaded dataset")
     print()
 
     # Evaluate (without gradients): iterate over all test samples
@@ -176,6 +176,7 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
         outputs = list()
         targets = list()
         for constants, prescribed, prognostic, target in tqdm(dataloader, desc="Generating forecasts"):
+            print("LOADING FORECAST DATA")
             # Load data and generate predictions
             constants = constants.to(device=device) if not constants.isnan().any() else None
             prescribed = prescribed.to(device=device) if not prescribed.isnan().any() else None
@@ -190,6 +191,9 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             inits.append(prognostic[:, 0].cpu())
             outputs.append(output.cpu())
             targets.append(target.cpu())
+            # remove
+            print("break loop")
+            break
         inits = th.cat(inits).numpy()
         outputs = th.cat(outputs).numpy()
         targets = th.cat(targets).numpy()
@@ -310,24 +314,26 @@ def build_dataset(
             ds.to_netcdf(dst_path_name, encoding=compress_dict)  # Silently write inits.nc and targets.nc
 
     print("\nWriting datasets to file. This may take a while.")# Optionally, reduce compression level via the -z flag")
-    t1 = threading.Thread(target=write_to_file, args=(
+    # Remove threading, write sequentially
+    
+    write_to_file(
         xr.Dataset(coords=coords, data_vars=inits_dict).chunk(chunkdict),
         os.path.join(file_path, "inits.nc"),
-        compress_dict,
-    ))
-    t2 = threading.Thread(target=write_to_file, args=(
+        compress_dict
+    )
+    print("stored inits.nc")
+    write_to_file(
         xr.Dataset(coords=coords, data_vars=outputs_dict).chunk(chunkdict),
         os.path.join(file_path, "outputs.nc"),
-        compress_dict,
-    ))
-    t3 = threading.Thread(target=write_to_file, args=(
+        compress_dict
+    )
+    print('stored outputs.nc')
+    write_to_file(
         xr.Dataset(coords=coords, data_vars=targets_dict).chunk(chunkdict),
         os.path.join(file_path, "targets.nc"),
-        compress_dict,
-    ))
-    t1.start(); t2.start(); t3.start()
-    t1.join(); t2.join(); t3.join()
-
+        compress_dict
+    )
+    
     print("\tDatasets successfully written to file\n")
 
 
@@ -605,9 +611,9 @@ def run_evaluations(
     :param device: The device where the evaluations are performed
     """
 
+    wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_unet") # replace with model name
+
     performance_dict = {}
-    #manager = multiprocessing.Manager()
-    #dataset_dict = manager.dict(cyl=None, hpx=None)
     dataset_hpx = None
     dataset_cyl = None
 
@@ -630,33 +636,32 @@ def run_evaluations(
         file_path = os.path.join("outputs", str(cfg.model.name), "evaluation")
         if os.path.exists(os.path.join(file_path, output_fname)):
             ds = xr.open_dataset(os.path.join(file_path, output_fname))
+
+
+        print("(1) LOADDED THE DATASET?")
         if not os.path.exists(os.path.join(file_path, output_fname)) or overide:
             os.makedirs(file_path, exist_ok=True)
             dataset = dataset_hpx if "hpx" in file_path else dataset_cyl
-            #process = multiprocessing.Process(target=evaluate_model, args=(cfg, file_path, dataset_dict, complevel, ))
-            #process.start()  # Run in separate process to release memory upon process termination
-            #process.join()
             dataset = evaluate_model(cfg=cfg, file_path=file_path, dataset=dataset, complevel=complevel)
             if "hpx" in file_path: dataset_hpx = dataset
             else: dataset_cyl = dataset
+
+        print("(2) Loading targets..")
         ds_inits = xr.open_dataset(os.path.join(file_path, "inits.nc"))
         ds_outputs = xr.open_dataset(os.path.join(file_path, "outputs.nc")).isel(time=slice(0, 1460))
         ds_targets = xr.open_dataset(os.path.join(file_path, "targets.nc"))
-
+        print("(3) Computing Metrics")
         # Compute forecast error metrics if they don't yet exist and write results to file
         if not os.path.exists(os.path.join(file_path, "rmses.nc")) or overide:
-            #process = multiprocessing.Process(
-            #    target=compute_metrics,
-            #    args=(cfg, ds_outputs, ds_targets, file_path, overide, )
-            #)
-            #process.start()  # Run in separate process to release memory upon process termination
-            #process.join()
+            
             compute_metrics(
                 cfg=cfg, ds_outputs=ds_outputs, ds_targets=ds_targets, file_path=file_path, overide=overide
             )
 
         # Add the current model's datasets to the performance dict for cross model evaluation later
         performance_dict[cfg.model.name] = dict(inits=ds_inits, outputs=ds_outputs, targets=ds_targets)
+
+        print("(4) Generating Videos")
 
         # Generate video showcasing model forecast
         if not os.path.exists(os.path.join(file_path, "videos")) or overide:
@@ -681,7 +686,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=["configs"],
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/unet'], #=["configs"],
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")

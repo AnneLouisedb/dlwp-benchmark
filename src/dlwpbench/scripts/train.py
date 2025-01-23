@@ -7,7 +7,7 @@ import os
 import sys
 import time
 import threading
-
+import xarray as xr
 import hydra
 import numpy as np
 import torch as th
@@ -17,6 +17,12 @@ from data.datasets import *
 from models import *
 import utils.utils as utils
 import wandb
+
+import matplotlib.pyplot as plt
+import io
+
+# internal import 
+from losses import CustomMSELoss
 
 @hydra.main(config_path='../configs/', config_name='config', version_base=None)
 def run_training(cfg):
@@ -32,7 +38,7 @@ def run_training(cfg):
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
 
-    wandb.init(project="dlwp-benchmark") 
+    wandb.init(project="dlwp-benchmark_scalingup") 
 
     if cfg.verbose: print("\nInitializing model")
 
@@ -46,7 +52,8 @@ def run_training(cfg):
     #exit()
 
     # Initialize training modules
-    criterion = th.nn.MSELoss()
+    criterion = CustomMSELoss() #th.nn.MSELoss()
+
     optimizer = th.optim.Adam(params=model.parameters(), lr=cfg.training.learning_rate)
     scheduler = th.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=cfg.training.epochs)
 
@@ -103,7 +110,7 @@ def run_training(cfg):
     )
 
     # Perform training by iterating over all epochs
-    if cfg.verbose: print("\nStart training. Inspect progress via 'tensorboard --logdir outputs'")
+    if cfg.verbose: print("\nStart training.")
     for epoch in range(epoch, cfg.training.epochs):
 
         wandb.log({"Epoch": epoch, "Learning Rate": optimizer.state_dict()["param_groups"][0]["lr"]}, step=iteration)
@@ -114,15 +121,15 @@ def run_training(cfg):
         # Train: iterate over all training samples
         outputs = list()
         targets = list()
-        for constants, prescribed, prognostic, target in train_dataloader:
+        
+        for train_idx, (constants, prescribed, prognostic, target) in enumerate(train_dataloader):
             # Prepare inputs and targets
             split_size = max(1, prognostic.shape[0]//cfg.training.gradient_accumulation_steps)
             constants = constants.to(device=device).split(split_size) if not constants.isnan().any() else None
             prescribed = prescribed.to(device=device).split(split_size) if not prescribed.isnan().any() else None
             prognostic = prognostic.to(device=device).split(split_size)
             target = target.to(device=device).split(split_size)
-            
-            
+
             # Perform optimization step and record outputs
             optimizer.zero_grad()
             for accum_idx in range(len(prognostic)):
@@ -131,6 +138,7 @@ def run_training(cfg):
                     prescribed=prescribed[accum_idx] if not prescribed == None else None,
                     prognostic=prognostic[accum_idx]
                 )
+                
                 train_loss = criterion(output, target[accum_idx])
                 train_loss.backward()
                 if cfg.training.clip_gradients:
@@ -140,7 +148,6 @@ def run_training(cfg):
                 targets.append(target[accum_idx].detach().cpu())
             optimizer.step()
             wandb.log({"MSE/training": train_loss}, step=iteration)
-            # writer.add_scalar(tag="MSE/training", scalar_value=train_loss, global_step=iteration)
             iteration += 1
         with th.no_grad(): epoch_train_loss = criterion(th.cat(outputs), th.cat(targets)).numpy()
 
@@ -148,6 +155,7 @@ def run_training(cfg):
         with th.no_grad():
             outputs = list()
             targets = list()
+
             for constants, prescribed, prognostic, target in val_dataloader:
                 split_size = max(1, prognostic.shape[0]//cfg.validation.gradient_accumulation_steps)
                 constants = constants.to(device=device).split(split_size) if not constants.isnan().any() else None
@@ -162,11 +170,111 @@ def run_training(cfg):
                     )
                     outputs.append(output.cpu())
                     targets.append(target[accum_idx].cpu())
-            epoch_val_loss = criterion(th.cat(outputs), th.cat(targets)).numpy()
+
+            
+            losses = []
+            outputs_cat = th.cat(outputs)
+            targets_cat = th.cat(targets)
+            variable_list = list(cfg.data.prognostic_variable_names_and_levels.keys())
+
+            criterion_wo_reduction = th.nn.MSELoss(reduction='none')
+
+            # MSE LOSS PER TIMESTEP - VALIDATION
+            mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()    
+            
+            log_dict = {
+                f"MSE_validation/time_{i}": value 
+                for i, value in enumerate(mean_loss_per_time_step)
+            }
+
+            # Log to wandb with the current iteration as the step
+            wandb.log(log_dict, step=iteration)
+
+            # Compute the mean loss over the first time step
+            if epoch % 10 == 0:
+                
+                # Calculate RMSE per gridpoint
+                rmse_gridpoint = th.sqrt(th.mean((outputs_cat[:, 0, :, :, :] - targets_cat[:, 0, :, :, :]) ** 2, dim=[0,1])).cpu().numpy()
+                
+                # Create a matplotlib figure
+                fig, ax = plt.subplots(figsize=(8, 6))
+                # Plot RMSE gridpoint
+                im = ax.imshow(rmse_gridpoint, cmap='viridis')
+                ax.set_title(f"RMSE per Gridpoint")
+                fig.colorbar(im, ax=ax)
+                
+                # Adjust layout
+                plt.tight_layout()
+                
+                # Log the figure to wandb
+                wandb.log({f"RMSE_validation/rmse_gridpoint_epoch{epoch}": wandb.Image(fig)})
+                
+                # Close the plot to free up memory
+                plt.close(fig)
+
+                # plot only the target variable
+                channel = 0
+                # Create a matplotlib figure with two subplots
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+                
+                # Plot output
+                im1 = ax1.imshow(outputs_cat[0, -1, channel, :, :].cpu().numpy(), cmap='viridis')
+                ax1.set_title(f"{variable_list[channel]} Output")
+                fig.colorbar(im1, ax=ax1)
+                
+                # Plot target
+                im2 = ax2.imshow(targets_cat[0, -1, channel, :, :].cpu().numpy(), cmap='viridis')
+                ax2.set_title(f"{variable_list[channel]} Target")
+                fig.colorbar(im2, ax=ax2)
+                
+                # Set a common title for the entire figure
+                fig.suptitle(f"Variable: {variable_list[channel]}, Epoch {epoch}", fontsize=16)
+                
+                # Adjust layout to prevent overlap
+                plt.tight_layout()
+                
+                # Log the figure to wandb
+                wandb.log({f"channel_{channel}_epoch{epoch}": wandb.Image(fig, caption=f"Predicted {channel}, single sample from batch")})
+                
+                # Close the plot to free up memory
+                plt.close(fig)
+                
+
+                # Find the ACC scores
+                #path_to_climatology = os.path.join("outputs", "climatology", "evaluation", "outputs.nc")
+                # path_to_climatology = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/climatology_1981-2010'
+                # print("\tComputing ACC...")
+
+                # ds_climatology = xr.open_dataset(path_to_climatology)
+
+                #outputs_cat, targets_cat #).mean(dim=(0, 2, 3, 4)).cpu().numpy()
+
+
+                # diff_out_clim = ds_outputs - ds_climatology
+                # diff_tar_clim = ds_targets - ds_climatology
+
+                    
+                # nom = (lat_weights*diff_out_clim*diff_tar_clim).mean(dim=mean_over)
+                # denom = np.sqrt(
+                #         (lat_weights*diff_out_clim**2).mean(dim=mean_over) * (lat_weights*diff_tar_clim**2).mean(dim=mean_over)
+                #     )
+                # accs = nom/denom
+                    
+
+            
+            for channel in range(outputs_cat.shape[2]):  # Iterate over channels
+
+                channel_output = outputs_cat[:, :, channel, :, :] 
+                channel_target = targets_cat[:, :, channel, :, :]
+                channel_loss = criterion(channel_output, channel_target).item()
+                losses.append(channel_loss)
+                wandb.log({f"MSE/validation_all_times_rollout/channel_{variable_list[channel]}":channel_loss}, step=iteration)
+                
+                
+            epoch_val_loss = criterion(outputs_cat, targets_cat).numpy()
 
         wandb.log({"MSE/validation": epoch_val_loss}, step=iteration)
        
-
         # Write model checkpoint to file, using a separate thread
         if cfg.training.save_model:
             if epoch_val_loss > best_val_error or epoch == cfg.training.epochs - 1:
@@ -178,8 +286,9 @@ def run_training(cfg):
                 target=utils.write_checkpoint,
                 args=(model, optimizer, scheduler, epoch, iteration, best_val_error, dst_path, ))
             thread.start()
+            
 
-            # Log checkpoint information with wandb
+            #Log checkpoint information with wandb
             wandb.log({
                 "checkpoint_saved": True,
                 "checkpoint_path": dst_path,
@@ -187,12 +296,8 @@ def run_training(cfg):
                 "epoch": epoch,
                 "iteration": iteration
             }, step=iteration)
-
-            # Create and log a wandb Artifact
-            artifact = wandb.Artifact(f"model_checkpoint_epoch_{epoch}", type="model")
-            artifact.add_file(dst_path)
-            wandb.log_artifact(artifact)
-
+            
+        
         # Print training progress to console
         if cfg.verbose:
             epoch_time = round(time.time() - start_time, 2)
