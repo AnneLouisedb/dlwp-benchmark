@@ -719,7 +719,7 @@ class SwinTransformer(nn.Module):
                 # In case of context_size > 1, blend prognostic input with outputs from previous time steps
                 prognostic_t = torch.cat(
                     tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size
-                             torch.stack(outs, dim=1)[:, -self.context_size:]].to(device=prognostic.device),  # Outputs since context_size
+                             torch.stack(outs, dim=1)[:, -self.context_size:]],  # Outputs since context_size
                     dim=1
                 )
                 x_t = self._prepare_inputs(

@@ -371,13 +371,12 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                 #print("lazy data time - input vector from dataloader")   
                 #print(lazy_data.time)
                 if self.init_dates is not None and self.sequence_length > len(lazy_data.time):
-                    print("MANUAL TISR")
                     # Augment TISR with values from 2017 when exceeding the date of the stored data
-                    manual_tisr = True
+                    manual_tisr = True 
                     diff = self.sequence_length - len(lazy_data.time)
-                    start_date = self.init_dates[item]
-                    stop_date = self.init_dates[item] + pd.Timedelta(f"{self.sequence_length*self.timedelta}h")
-                    dates = pd.date_range(start=start_date, end=stop_date, freq=f"{self.timedelta}h")
+                    start_date = self.init_dates[item] + pd.Timedelta("11h")
+                    stop_date = self.init_dates[item] + pd.Timedelta(f"{self.sequence_length*self.timedelta*24}h")
+                    dates = pd.date_range(start=start_date, end=stop_date, freq=f"{self.timedelta*24}h")
                     lazy_data = lazy_data.values
                     tmp = list()
                     # Overide year with 2017 under consideration of leap years
@@ -499,7 +498,7 @@ if __name__ == "__main__":
         sequence_length=15,
         noise=0.0,
         normalize=True,
-        downscale_factor=None
+        downscale_factor=1
     )
     
 
@@ -512,6 +511,7 @@ if __name__ == "__main__":
 
     for constants, prescribed, prognostic, target in train_dataloader:
         print(constants.shape, prescribed.shape, prognostic.shape, target.shape)
+        
         break
 
     print(dataset)

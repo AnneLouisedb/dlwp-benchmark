@@ -5,7 +5,7 @@ import torch as th
 import einops
 from utils import CylinderPad
 from utils import HEALPixLayer
-
+import wandb
 
 class UNet(th.nn.Module):
     """
@@ -76,14 +76,8 @@ class UNet(th.nn.Module):
         # prognostic: [B, T, C, (F), H, W]
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
-
-        # print("prognostic shapes", prognostic.shape[1]) # number of time steps predicted (e.g output 2)
-        # print('context size', self.context_size)
-        # print('shape entire prognostic?', prognostic.shape)
-        # print('shape entire prescribed?', prescribed.shape)
-
         for t in range(self.context_size, prognostic.shape[1]):
-            print("Predicting ahead Day:", t)
+            # For each t I want to store the loss in an array, and see how the prediction skill decreases over time
           
             t_start = max(0, t-(self.context_size))
             if t == self.context_size:
