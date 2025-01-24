@@ -58,7 +58,7 @@ def make_biweekly_inits(
     start: str = "2017-01-01T11:00:00.000000000",
     end: str = "2018-12-31T11:00:00.000000000",
     sequence_length: int = 15,
-    timedelta: int = 24 #24 #6
+    timedelta: int = 1 
 ):
     times1 = pd.date_range(start=start,
                            end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
@@ -264,7 +264,7 @@ def build_dataset(
     B, T, D, H, W = outputs.shape
     deg = 5.625
 
-    dt = f"{cfg.data.timedelta}h"
+    dt = f"{cfg.data.timedelta*24}h"
     timedeltas = pd.timedelta_range(start=dt, periods=T, freq=dt)
 
     # Set up netCDF dataset
@@ -427,7 +427,7 @@ def plot_acc_over_time(
 
     file_path = "./plots"
     os.makedirs(file_path, exist_ok=True)
-    dt = cfg.data.timedelta
+    dt = cfg.data.timedelta * 24 # Days!
 
     vnames = list(performance_dict[list(performance_dict.keys())[0]]["outputs"].keys())
     for vname in vnames:
@@ -453,6 +453,11 @@ def plot_acc_over_time(
         #fig.suptitle(plot_title)
         fig.tight_layout()
         fig.savefig(os.path.join(file_path, f"acc_plot_{vname}.pdf"))
+
+        # Log to Weights & Biases
+        wandb.log({
+            f"acc_plot_{vname}": wandb.Image(fig)})
+        
         plt.close()
 
 
@@ -467,7 +472,7 @@ def plot_rmse_over_time(
 
     file_path = "./plots"
     os.makedirs(file_path, exist_ok=True)
-    dt = cfg.data.timedelta
+    dt = cfg.data.timedelta * 24 # DAYS!
 
     vnames = list(performance_dict[list(performance_dict.keys())[0]]["outputs"].keys())
     for vname in vnames:
@@ -494,7 +499,12 @@ def plot_rmse_over_time(
         #fig.suptitle(plot_title)
         fig.tight_layout()
         fig.savefig(os.path.join(file_path, f"rmse_plot_{vname}.pdf"))
+
+        # Log to Weights & Biases
+        wandb.log({
+            f"rmse_plot_{vname}": wandb.Image(fig) })
         plt.close()
+        
 
 
 def compute_metrics(
@@ -611,7 +621,7 @@ def run_evaluations(
     :param device: The device where the evaluations are performed
     """
 
-    wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_unet") # replace with model name
+    wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_swintransformer") # replace with model name
 
     performance_dict = {}
     dataset_hpx = None
@@ -677,6 +687,7 @@ def run_evaluations(
         del ds_inits, ds_outputs, ds_targets
         gc.collect()
 
+    print("(5) Plotting RMSE and ACC")
     #if overide: plot_rmse_over_time(cfg-cfg, performance_dict=performance_dict)
     plot_rmse_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
     plot_acc_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
@@ -686,7 +697,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/unet'], #=["configs"],
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/swintransformer'], #unet'], #=["configs"],
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")

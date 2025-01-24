@@ -26,8 +26,8 @@ class CustomMSELoss(th.nn.Module):
         self.weights = th.tensor(weights_map.weights.values).T
         
     def forward(self, input, target):
-        
-        self.spatial_weights = th.tensor(self.weights, device = input.device)
+
+        self.spatial_weights = th.as_tensor(self.weights, device=input.device)
 
         d = ((target-input)**2)*self.spatial_weights 
 
