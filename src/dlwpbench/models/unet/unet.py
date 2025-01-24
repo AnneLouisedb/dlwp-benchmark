@@ -120,7 +120,7 @@ class ModernUNet(th.nn.Module):
 
             enc2 = self.middle(enc[-1])
 
-            out = self.decoder(x=enc2[-1], skips=enc[::-1]) 
+            out = self.decoder(x=enc2, skips=enc[::-1]) 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
             out = prognostic_t[:, -1] + out
 
@@ -294,7 +294,7 @@ class UNetEncoder(th.nn.Module):
         in_channels: int = 2,
         hidden_channels: list = [8, 16, 32],
         n_convolutions: int = 2,
-        activation: th.nn.Module = th.nn.ReLU(),
+        activation: th.nn.Module = th.nn.GELU(),
         mesh: str = "equirectangular"
     ):
         super(UNetEncoder, self).__init__()
@@ -353,7 +353,7 @@ class UNetDecoder(th.nn.Module):
         hidden_channels: list = [8, 16, 32],
         out_channels: int = 2,
         n_convolutions: int = 2,
-        activation: th.nn.Module = th.nn.ReLU(),
+        activation: th.nn.Module = th.nn.GELU(),
         mesh: str = "equirectangular"
     ):
         super(UNetDecoder, self).__init__()
@@ -547,6 +547,8 @@ class ModernUNetDecoder(th.nn.Module):
 
     def forward(self, x: th.Tensor, skips: list) -> th.Tensor:
         for l_idx, layer in enumerate(self.layers):
+            print('shape', skips[l_idx].shape)
+            print('x shape', x.shape)
             x = th.cat([skips[l_idx], x], dim=1) if l_idx > 0 else x
             x = layer(x)
         return self.output_layer(self.activation(self.final_norm(x)))
@@ -678,6 +680,7 @@ class MiddleBlock(th.nn.Module):
             norm = norm
         
         )
+        
         self.attn = th.nn.Identity() # AttentionBlock(in_channels) if attention else th.nn.Identity()
 
         self.res2 = ResidualBlock(
@@ -688,8 +691,12 @@ class MiddleBlock(th.nn.Module):
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
+        print("MIDDLE block")
         x = self.res1(x)
+        print('x', x.shape)
         x = self.attn(x)
         x = self.res2(x)
+        print('x', x.shape)
+       
         return x
 

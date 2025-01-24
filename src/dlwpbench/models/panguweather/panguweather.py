@@ -484,11 +484,19 @@ class PanguWeather(nn.Module):
                 )
             else:
                 # In case of context_size > 1, blend prognostic input with outputs from previous time steps
+                output_tensor = torch.stack(outs, dim=1)
                 prognostic_t = torch.cat(
                     tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size
-                             torch.stack(outs, dim=1)[:, -self.context_size:]].to(device=prognostic.device),  # Outputs since context_size
+                            output_tensor[:, -self.context_size:]],  # Outputs since context_size
                     dim=1
                 )
+
+                # In case of context_size > 1, blend prognostic input with outputs from previous time steps
+                # prognostic_t = torch.cat(
+                #     tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size
+                #              torch.stack(outs, dim=1)[:, -self.context_size:]].to(device=prognostic.device),  # Outputs since context_size
+                #     dim=1
+                # )
                 x_t = self._prepare_inputs(
                     constants=constants,
                     prescribed=prescribed[:, t-self.context_size:t] if prescribed is not None else None,
@@ -497,7 +505,7 @@ class PanguWeather(nn.Module):
 
             # Forward input through model
             out = prognostic_t[:, -1] + self.forward_one_step(x=x_t)
-            outs.append(out.cpu())
+            outs.append(out) # .cpu()
         
         return torch.stack(outs, dim=1)
         
