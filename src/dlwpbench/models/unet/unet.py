@@ -49,8 +49,8 @@ class ModernUNet(th.nn.Module):
             in_channels=hidden_channels[-1], 
             #attention = attention,
             norm = norm,
-            activation=activation,
-            #mesh=mesh
+            activation=activation
+            #mesh = mesh
             )
       
 
@@ -454,6 +454,7 @@ class ModernUNetEncoder(th.nn.Module):
                 if mesh == "equirectangular":
                     #layer.append(CylinderPad(padding=1))
                     # (1) norm (2) activation (3) convolution
+                    
                     layer.append(ResidualBlock(
                         in_channels=c_in if n_conv == 0 else c_out,
                         out_channels=c_out,
@@ -600,17 +601,18 @@ class ResidualBlock(th.nn.Module):
         norm: bool = False,
         n_groups: int = 8,
         kernel_size = 3,
-        padding = 1,
+        padding = 1
+        
     ):
         super().__init__()
        
         self.activation = activation
-        self.cylinder_pad = CylinderPad(padding=padding)
+        
 
         # padding already provided 
-        
-        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-        self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding= padding))
+        self.cylinder_pad = CylinderPad(padding=padding)
+        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=0) 
+        self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=0)) 
         # If the number of input channels is not equal to the number of output channels we have to
         # project the shortcut connection
         if in_channels != out_channels:
@@ -627,13 +629,14 @@ class ResidualBlock(th.nn.Module):
 
     def forward(self, x: th.Tensor):
         # First convolution layer
-
-        #x = self.cylinder_pad(x)
-        h = self.conv1(self.activation(self.norm1(x)))
+        h = self.activation(self.norm1(x))
+        h = self.cylinder_pad(h)
+        h = self.conv1(h)
         
         # Second convolution layer
-        #h = self.cylinder_pad(h)
-        h = self.conv2(self.activation(self.norm2(h)))
+        h = self.activation(self.norm2(h))
+        h = self.cylinder_pad(h)
+        h = self.conv2(h)
         # Add the shortcut connection and return
         
         return h + self.shortcut(x)
