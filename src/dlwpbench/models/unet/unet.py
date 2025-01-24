@@ -5,15 +5,12 @@ import torch as th
 import einops
 from utils import CylinderPad
 from utils import HEALPixLayer
-import wandb
-
-# internal imports
-from blocks import MiddleBlock, ResiduaBlock
-
 
 class ModernUNet(th.nn.Module):
     """
-    A ModernUNet implementation as by the PDE Refiner Paper
+    A ModernUNet implementation as by the PDE Refiner Paper.
+
+    Quote from paper: 'We also experimented with adding attention layers in the residual blocks, which, however, did not improve performance noticeably.'
     """
 
     def __init__(
@@ -21,24 +18,21 @@ class ModernUNet(th.nn.Module):
         constant_channels: int = 4,
         prescribed_channels: int = 0,
         prognostic_channels: int = 1,
-        hidden_channels: list = [8, 16, 32],
+        hidden_channels: list = [64, 128, 256, 1024],
         n_convolutions: int = 2,
-        activation: th.nn.Module = th.nn.ReLU(),
+        activation: th.nn.Module = th.nn.GELU(),
         context_size: int = 1,
         mesh: str = "equirectangular",
-        norm: str = None,
-        middle_block: str = None, # configs
         attention: bool = False,
+        norm: bool = False, # groupnorm in each residual block?
         **kwargs
     ):
-        super(UNet, self).__init__()
+        super(ModernUNet, self).__init__()
         if isinstance(activation, str): activation = eval(activation)
 
         self.context_size = context_size
         self.mesh = mesh
-        self.norm = norm
-        self.middle_block = middle_block
-        
+       
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
         print("In channels UNet from initialization", in_channels)
         self.encoder = ModernUNetEncoder(
@@ -54,7 +48,8 @@ class ModernUNet(th.nn.Module):
             #attention = attention,
             norm = norm,
             activation=activation,
-            mesh=mesh)
+            #mesh=mesh
+            )
       
 
         self.decoder = ModernUNetDecoder(
@@ -123,9 +118,9 @@ class ModernUNet(th.nn.Module):
 
             enc = self.encoder(x_t)
 
-            enc2 = self.middle(enc)
+            enc2 = self.middle(enc[-1])
 
-            out = self.decoder(x=enc2[-1], skips=enc2[::-1]) 
+            out = self.decoder(x=enc2[-1], skips=enc[::-1]) 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
             out = prognostic_t[:, -1] + out
 
@@ -149,7 +144,7 @@ class UNet(th.nn.Module):
         prognostic_channels: int = 1,
         hidden_channels: list = [8, 16, 32],
         n_convolutions: int = 2,
-        activation: th.nn.Module = th.nn.ReLU(),
+        activation: th.nn.Module = th.nn.GELU(),
         context_size: int = 1,
         mesh: str = "equirectangular",
         
@@ -435,7 +430,7 @@ class ModernUNetEncoder(th.nn.Module):
         attention: bool = False,
         mesh: str = "equirectangular"
     ):
-        super(UNetEncoder, self).__init__()
+        super(ModernUNetEncoder, self).__init__()
         self.layers = []
         self.attn = th.nn.Identity() # attention is not yet implemented
 
@@ -455,7 +450,7 @@ class ModernUNetEncoder(th.nn.Module):
                 if mesh == "equirectangular":
                     layer.append(CylinderPad(padding=1))
                     # (1) norm (2) activation (3) convolution
-                    layer.append(ResiduaBlock(
+                    layer.append(ResidualBlock(
                         in_channels=c_in if n_conv == 0 else c_out,
                         out_channels=c_out))
                     # (4) Attention
@@ -464,7 +459,7 @@ class ModernUNetEncoder(th.nn.Module):
                              
                 # elif mesh == "healpix":
                 #     layer.append(HEALPixLayer(
-                #         layer=ResiduaBlock,
+                #         layer=ResidualBlock,
                 #         in_channels=c_in if n_conv == 0 else c_out,
                 #         out_channels=c_out))
                 #     layer.append(self.attn)
@@ -493,7 +488,7 @@ class ModernUNetDecoder(th.nn.Module):
         attention: bool = False,
         mesh: str = "equirectangular"
     ):
-        super(UNetDecoder, self).__init__()
+        super(ModernUNetDecoder, self).__init__()
         self.layers = []
         hidden_channels = hidden_channels[::-1]  # Invert as we go up in decoder, i.e., from bottom to top layers
         self.attn = th.nn.Identity() # attention is not yet implemented
@@ -511,9 +506,9 @@ class ModernUNetDecoder(th.nn.Module):
                 c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
                 if mesh == "equirectangular":
                     layer.append(CylinderPad(padding=1))
-                    layer.append(ResiduaBlock,
+                    layer.append(ResidualBlock(
                         in_channels=c_in_ if n_conv == 0 else c_out,
-                        out_channels=c_out)
+                        out_channels=c_out))
                     layer.append(self.attn)
                     
                 # elif mesh == "healpix":
@@ -557,56 +552,6 @@ class ModernUNetDecoder(th.nn.Module):
         return self.output_layer(self.activation(self.final_norm(x)))
     
 
-# class UpBlock(ConditionedBlock):
-#     """Up block This combines `ResidualBlock` and `AttentionBlock`.
-
-#     These are used in the second half of U-Net at each resolution.
-
-#     Args:
-#         in_channels (int): Number of input channels
-#         out_channels (int): Number of output channels
-#         cond_channels (int): Number of channels in the conditioning vector.
-#         has_attn (bool): Whether to use attention block
-#         activation (str): Activation function
-#         norm (bool): Whether to use normalization
-#         use_scale_shift_norm (bool): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`).
-#         n_dims (int): Number of spatial dimensions. Defaults to 1.
-#     """
-
-#     def __init__(
-#         self,
-#         in_channels: int,
-#         out_channels: int,
-#         cond_channels: int,
-#         has_attn: bool = False,
-#         activation: str = "gelu",
-#         norm: bool = False,
-#         use_scale_shift_norm: bool = False,
-#         n_dims: int = 1,
-#     ):
-#         super().__init__()
-#         # The input has `in_channels + out_channels` because we concatenate the output of the same resolution
-#         # from the first half of the U-Net
-#         self.res = ResidualBlock(
-#             in_channels + out_channels,
-#             out_channels,
-#             cond_channels,
-#             activation=activation,
-#             norm=norm,
-#             use_scale_shift_norm=use_scale_shift_norm,
-#             n_dims=n_dims,
-#         )
-#         if has_attn:
-#             self.attn = AttentionBlock(out_channels)
-#         else:
-#             self.attn = nn.Identity()
-
-#     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
-#         x = self.res(x, emb)
-#         x = self.attn(x)
-#         return x
-
-
 if __name__ == "__main__":
 
     # Demo
@@ -633,3 +578,118 @@ if __name__ == "__main__":
     x = th.randn(4, 25, in_channels, 32, 64)  # B, T, C, H, W
     y_hat = model(x=x, teacher_forcing_steps=teacher_forcing_steps)
     print(y_hat.shape)
+
+
+# BLOCKS
+    
+
+
+def zero_module(module):
+    """Zero out the parameters of a module and return it."""
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
+
+class AttentionBlockl(th.nn.Module):
+    def __init__(
+        self,
+        in_channels: int):
+        super().__init__()
+   
+        pass
+
+
+class ResidualBlock(th.nn.Module):
+    """Wide Residual Blocks used in modern Unet architectures.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        cond_channels (int): Number of channels in the conditioning vector.
+        activation (str): Activation function to use.
+        norm (bool): Whether to use normalization.
+        n_groups (int): Number of groups for group normalization. # CHECK DEFAULT?
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        activation =  th.nn.GELU(),
+        norm: bool = False,
+        n_groups: int = 8,
+    ):
+        super().__init__()
+       
+        self.activation = activation
+
+        # padding already provided 
+        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=(1,1))
+        self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), padding=(1, 1)))
+        # If the number of input channels is not equal to the number of output channels we have to
+        # project the shortcut connection
+        if in_channels != out_channels:
+            self.shortcut = th.nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
+        else:
+            self.shortcut = th.nn.Identity()
+
+        if norm:
+            self.norm1 = th.nn.GroupNorm(n_groups, in_channels)
+            self.norm2 = th.nn.GroupNorm(n_groups, out_channels)
+        else:
+            self.norm1 = th.nn.Identity()
+            self.norm2 = th.nn.Identity()
+
+    def forward(self, x: th.Tensor):
+        # First convolution layer
+        h = self.conv1(self.activation(self.norm1(x)))
+        # Second convolution layer
+        h = self.conv2(self.activation(self.norm2(h)))
+        # Add the shortcut connection and return
+        return h + self.shortcut(x)
+
+
+class MiddleBlock(th.nn.Module):
+    """Middle block It combines a `ResidualBlock`, `AttentionBlock`, followed by another
+    `ResidualBlock`.
+
+    This block is applied at the lowest resolution of the U-Net.
+
+    Args:
+        n_channels (int): Number of channels in the input and output.
+        has_attn (bool, optional): Whether to use attention block. Defaults to False.
+        activation (str): Activation function to use. Defaults to "gelu".
+        norm (bool, optional): Whether to use normalization. Defaults to False.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        attention: bool = False,
+        activation = th.nn.GELU(),
+        norm: bool = False,
+         
+    ):
+        super().__init__()
+        self.res1 = ResidualBlock(
+            in_channels,
+            in_channels,
+            activation=activation,
+            norm = norm
+        
+        )
+        self.attn = th.nn.Identity() # AttentionBlock(in_channels) if attention else th.nn.Identity()
+
+        self.res2 = ResidualBlock(
+            in_channels,
+            in_channels,
+            activation=activation,
+            norm = norm
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        x = self.res1(x)
+        x = self.attn(x)
+        x = self.res2(x)
+        return x
+
