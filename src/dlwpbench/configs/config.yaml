@@ -3,8 +3,8 @@ defaults:
   - training: default
   - validation: default
   - testing: default
-  - data: weatherbench
-  - model: fno
+  - data: initial_variables
+  - model: unet
   - override hydra/hydra_logging: disabled  
   - override hydra/job_logging: disabled  
 

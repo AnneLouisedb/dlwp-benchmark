@@ -21,7 +21,6 @@ class ModernUNet(th.nn.Module):
         prescribed_channels: int = 0,
         prognostic_channels: int = 1,
         hidden_channels: list = [64, 128, 256, 1024],
-        n_convolutions: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         context_size: int = 1,
         mesh: str = "equirectangular",
@@ -40,7 +39,6 @@ class ModernUNet(th.nn.Module):
         self.encoder = ModernUNetEncoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
-            n_convolutions=n_convolutions,
             activation=activation,
             attention = attention,
             mesh=mesh
@@ -57,7 +55,6 @@ class ModernUNet(th.nn.Module):
         self.decoder = ModernUNetDecoder(
             hidden_channels=hidden_channels,
             out_channels=prognostic_channels,
-            n_convolutions=n_convolutions,
             activation=activation,
             mesh=mesh
         )
@@ -429,7 +426,6 @@ class ModernUNetEncoder(th.nn.Module):
         self,
         in_channels: int = 2,
         hidden_channels: list = [64, 128, 256, 1024],
-        n_convolutions: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
         mesh: str = "equirectangular"
@@ -446,24 +442,21 @@ class ModernUNetEncoder(th.nn.Module):
             c_out = channels[c_idx+1]
 
             # Apply downsampling prior to convolutions if not in top-most layer
-            if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
-
-            # Perform n convolutions (only half as many in bottom-most layer, since other half is done in decoder)
-            n_convs = n_convolutions//2 if c_idx == len(hidden_channels)-1 else n_convolutions
-            for n_conv in range(n_convs):
-                if mesh == "equirectangular":
-                    #layer.append(CylinderPad(padding=1))
-                    # (1) norm (2) activation (3) convolution
-                    
-                    layer.append(ResidualBlock(
-                        in_channels=c_in if n_conv == 0 else c_out,
-                        out_channels=c_out,
-                        kernel_size= 3,
-                        padding = 1))
-                        #stride= 1 if n_conv == 0 else 2)
-                        #)
-                    # (4) Attention
-                    layer.append(self.attn)
+            
+            if c_idx > 0: layer.append(th.nn.Conv2d(c_in, c_in, (3, 3), (2, 2), (1, 1)))
+            #if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
+            if mesh == "equirectangular":
+                #layer.append(CylinderPad(padding=1))
+                # (1) norm (2) activation (3) convolution
+                
+                layer.append(ResidualBlock(
+                    in_channels=c_in, 
+                    out_channels=c_out,
+                    kernel_size= 3,
+                    padding = 1))
+                  
+                # (4) Attention
+                layer.append(self.attn)
                     
                              
                 # elif mesh == "healpix":
@@ -492,7 +485,6 @@ class ModernUNetDecoder(th.nn.Module):
         self,
         hidden_channels: list = [64, 128, 256, 1024],
         out_channels: int = 2,
-        n_convolutions: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
         mesh: str = "equirectangular"
@@ -509,18 +501,15 @@ class ModernUNetDecoder(th.nn.Module):
             c_in = hidden_channels[c_idx]
             c_out = hidden_channels[c_idx]
 
-            # Perform n convolutions (only half as many in bottom-most layer, since other half is done in encoder)
-            n_convs = n_convolutions//2 if c_idx == 0 else n_convolutions
-            for n_conv in range(n_convs):
-                c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
-                if mesh == "equirectangular":
-                    #layer.append(CylinderPad(padding=1))
-                    layer.append(ResidualBlock(
-                        in_channels=c_in_ if n_conv == 0 else c_out,
-                        out_channels=c_out,
-                        kernel_size= 3,
-                        padding = 1))
-                    layer.append(self.attn)
+            
+            c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
+            if mesh == "equirectangular":
+                layer.append(ResidualBlock(
+                    in_channels=c_in_ , 
+                    out_channels=c_out,
+                    kernel_size= 3,
+                    padding = 1))
+                layer.append(self.attn)
                     
                 # elif mesh == "healpix":
                 #     layer.append(HEALPixLayer(
@@ -534,13 +523,14 @@ class ModernUNetDecoder(th.nn.Module):
                 
             # Apply upsampling if not in top-most layer
             if c_idx < len(hidden_channels)-1: 
-                layer.append(th.nn.ConvTranspose2d(
-                    in_channels=c_out,
-                    out_channels=hidden_channels[c_idx+1],
-                    kernel_size=2,
-                    stride=2
-                    #kernel_size=3, # see pdf refiner paper
-                ))
+                layer.append(th.nn.ConvTranspose2d(c_out, hidden_channels[c_idx+1], (4, 4), (2, 2), (1, 1)))
+                # layer.append(th.nn.ConvTranspose2d(
+                #     in_channels=c_out,
+                #     out_channels=hidden_channels[c_idx+1],
+                #     kernel_size=2,
+                #     stride=2
+                #     #kernel_size=3, # see pdf refiner paper
+                # ))
 
             self.layers.append(th.nn.Sequential(*layer))
 
@@ -632,6 +622,7 @@ class ResidualBlock(th.nn.Module):
         h = self.activation(self.norm1(x))
         h = self.cylinder_pad(h)
         h = self.conv1(h)
+
         
         # Second convolution layer
         h = self.activation(self.norm2(h))
@@ -697,7 +688,7 @@ if __name__ == "__main__":
     context_size = 2
     mesh = "equirectangular"
     teacher_forcing_steps = 15
-
+    
     model = UNet(
         name="model_name",
         in_channels=in_channels,

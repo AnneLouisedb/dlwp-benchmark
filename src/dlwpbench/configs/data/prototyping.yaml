@@ -8,7 +8,7 @@ val_start_date: 2016-10-01
 val_stop_date: 2016-12-31
 test_start_date: 2017-01-01
 test_stop_date: 2018-12-31
-timedelta: 6  # Hours
+timedelta: 1 # Days!
 init_dates: null
 normalize: true
 num_workers: 2
@@ -31,14 +31,17 @@ prognostic_variable_names_and_levels:
   #pv: [850]                 # potential_vorticity
   #q: [850]                  # specific_humidity
   #r: [850]                  # relative_humidity
-  t: [850]                  # temperature
+  #t: [850]                  # temperature
   t2m: []                   # 2m_temperature
   #tcc: []                   # total_cloud_cover
   #u: [1000]                  # u_component_of_wind
-  u10: []                   # 10m_u_component_of_wind
+  #u10: []                   # 10m_u_component_of_wind
   #v: [1000]                  # v_component_of_wind
-  v10: []                   # 10m_v_component_of_wind
+  #v10: []                   # 10m_v_component_of_wind
   #vo: [850]                 # vorticity
-  z: [300, 500, 700, 1000]  # geopotential
+  #z: [300, 500, 700, 1000]  # geopotential
   #z: [500]  # geopotential
   #z500: []                  # geopotential_500
+  sst: []
+  msl: []
+  stream500: []

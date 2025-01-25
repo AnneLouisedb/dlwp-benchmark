@@ -2,7 +2,7 @@ type: PanguWeather
 name: test
 constant_channels: 4
 prescribed_channels: 1
-prognostic_channels: 8
+prognostic_channels: 3 
 embed_dim: 192
 num_heads: [6, 12, 12, 6]
 window_size: [2, 6, 12]

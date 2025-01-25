@@ -1,0 +1,32 @@
+_target_: data.datasets.WeatherBenchDataset
+type: WeatherBenchDataset
+data_path: data/zarr/weatherbench/
+engine: zarr
+train_start_date: 1979-01-02 # 2014-10-01 
+train_stop_date: 2014-12-31
+val_start_date: 2015-01-01 #2016-10-01
+val_stop_date: 2016-12-31
+test_start_date: 2017-01-01
+test_stop_date: 2018-12-31
+timedelta: 1 #Days between input steps
+init_dates: null
+normalize: true
+num_workers: 2
+drop_last: true
+height: 32
+width: 64
+sequence_length: None  # Overridden by training/validation/testing config
+downscale_factor: 1
+context_size: ${model.context_size}
+constant_names: 
+  - orography
+  - lsm   # land-sea mask
+  - lat2d
+  - lon2d
+prescribed_variable_names:
+  - tisr  # top of atmosphere incoming solar radiation
+prognostic_variable_names_and_levels:
+  #sst: []
+  msl: []
+  stream: [250, 500] # this is stream500
+  #stream250: []
