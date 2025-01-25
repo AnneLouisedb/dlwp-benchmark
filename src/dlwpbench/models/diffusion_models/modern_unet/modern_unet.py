@@ -3,14 +3,14 @@ import einops
 from utils import CylinderPad
 from utils import HEALPixLayer
 
-from .condition_utils import ConditionedBlock, fourier_embedding
-
 # Largely based on https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/diffusion/ddpm/unet.py
 # MIT License
 
 
 class ModernUNet(th.nn.Module):
     """
+    use_scale_shift_norm (bool): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`). Defaults to False.
+    
     A ModernUNet implementation as by the PDE Refiner Paper.
 
     Quote from paper: 'We also experimented with adding attention layers in the residual blocks, which, however, did not improve performance noticeably.'
@@ -22,12 +22,12 @@ class ModernUNet(th.nn.Module):
         prescribed_channels: int = 0,
         prognostic_channels: int = 1,
         hidden_channels: list = [64, 128, 256, 1024],
-        n_convolutions: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         context_size: int = 1,
         mesh: str = "equirectangular",
         attention: bool = False,
         norm: bool = False, # groupnorm in each residual block?
+        
         **kwargs
     ):
         super(ModernUNet, self).__init__()
@@ -35,13 +35,19 @@ class ModernUNet(th.nn.Module):
 
         self.context_size = context_size
         self.mesh = mesh
+        time_embed_dim = hidden_channels * 4
+        self.time_embed = th.nn.Sequential(
+            th.nn.Linear(hidden_channels, time_embed_dim),
+            self.activation,
+            th.nn.Linear(time_embed_dim, time_embed_dim),
+        )
        
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
         
         self.encoder = ModernUNetEncoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
-            n_convolutions=n_convolutions,
+            time_embed_dim = time_embed_dim,
             activation=activation,
             attention = attention,
             mesh=mesh
@@ -49,16 +55,18 @@ class ModernUNet(th.nn.Module):
         self.middle = MiddleBlock(
             in_channels=hidden_channels[-1], 
             #attention = attention,
+            time_embed_dim = time_embed_dim,
             norm = norm,
             activation=activation,
-            #mesh=mesh
+            use_scale_shift_norm=use_scale_shift_norm
+            #mesh = mesh
             )
       
 
         self.decoder = ModernUNetDecoder(
             hidden_channels=hidden_channels,
             out_channels=prognostic_channels,
-            n_convolutions=n_convolutions,
+            time_embed_dim = time_embed_dim,
             activation=activation,
             mesh=mesh
         )
@@ -137,9 +145,6 @@ class ModernUNet(th.nn.Module):
         return th.stack(outs, dim=1)
 
 
-
-
-
 class ModernUNetEncoder(th.nn.Module):
     """Unet encoder as used in the pde-refiner paper.
     - Each downblock combines the ResiduaBlock and the AttentionBlock??"""
@@ -148,7 +153,7 @@ class ModernUNetEncoder(th.nn.Module):
         self,
         in_channels: int = 2,
         hidden_channels: list = [64, 128, 256, 1024],
-        n_convolutions: int = 2,
+        time_embed_dim = 1024,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
         mesh: str = "equirectangular"
@@ -165,23 +170,22 @@ class ModernUNetEncoder(th.nn.Module):
             c_out = channels[c_idx+1]
 
             # Apply downsampling prior to convolutions if not in top-most layer
-            if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
-
-            # Perform n convolutions (only half as many in bottom-most layer, since other half is done in decoder)
-            n_convs = n_convolutions//2 if c_idx == len(hidden_channels)-1 else n_convolutions
-            for n_conv in range(n_convs):
-                if mesh == "equirectangular":
-                    #layer.append(CylinderPad(padding=1))
-                    # (1) norm (2) activation (3) convolution
-                    layer.append(ResidualBlock(
-                        in_channels=c_in if n_conv == 0 else c_out,
-                        out_channels=c_out,
-                        kernel_size= 3,
-                        padding = 1))
-                        #stride= 1 if n_conv == 0 else 2)
-                        #)
-                    # (4) Attention
-                    layer.append(self.attn)
+            
+            if c_idx > 0: layer.append(th.nn.Conv2d(c_in, c_in, (3, 3), (2, 2), (1, 1)))
+            #if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
+            if mesh == "equirectangular":
+                #layer.append(CylinderPad(padding=1))
+                # (1) norm (2) activation (3) convolution
+                
+                layer.append(ResidualBlock(
+                    in_channels=c_in, 
+                    out_channels=c_out,
+                    cond_channels=time_embed_dim,
+                    kernel_size= 3,
+                    padding = 1))
+                  
+                # (4) Attention
+                layer.append(self.attn)
                     
                              
                 # elif mesh == "healpix":
@@ -210,7 +214,6 @@ class ModernUNetDecoder(th.nn.Module):
         self,
         hidden_channels: list = [64, 128, 256, 1024],
         out_channels: int = 2,
-        n_convolutions: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
         mesh: str = "equirectangular"
@@ -227,18 +230,15 @@ class ModernUNetDecoder(th.nn.Module):
             c_in = hidden_channels[c_idx]
             c_out = hidden_channels[c_idx]
 
-            # Perform n convolutions (only half as many in bottom-most layer, since other half is done in encoder)
-            n_convs = n_convolutions//2 if c_idx == 0 else n_convolutions
-            for n_conv in range(n_convs):
-                c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
-                if mesh == "equirectangular":
-                    #layer.append(CylinderPad(padding=1))
-                    layer.append(ResidualBlock(
-                        in_channels=c_in_ if n_conv == 0 else c_out,
-                        out_channels=c_out,
-                        kernel_size= 3,
-                        padding = 1))
-                    layer.append(self.attn)
+            
+            c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
+            if mesh == "equirectangular":
+                layer.append(ResidualBlock(
+                    in_channels=c_in_ , 
+                    out_channels=c_out,
+                    kernel_size= 3,
+                    padding = 1))
+                layer.append(self.attn)
                     
                 # elif mesh == "healpix":
                 #     layer.append(HEALPixLayer(
@@ -252,25 +252,25 @@ class ModernUNetDecoder(th.nn.Module):
                 
             # Apply upsampling if not in top-most layer
             if c_idx < len(hidden_channels)-1: 
-                layer.append(th.nn.ConvTranspose2d(
-                    in_channels=c_out,
-                    out_channels=hidden_channels[c_idx+1],
-                    kernel_size=2,
-                    stride=2
-                    #kernel_size=3, # see pdf refiner paper
-                ))
+                layer.append(th.nn.ConvTranspose2d(c_out, hidden_channels[c_idx+1], (4, 4), (2, 2), (1, 1)))
+                # layer.append(th.nn.ConvTranspose2d(
+                #     in_channels=c_out,
+                #     out_channels=hidden_channels[c_idx+1],
+                #     kernel_size=2,
+                #     stride=2
+                #     #kernel_size=3, # see pdf refiner paper
+                # ))
 
             self.layers.append(th.nn.Sequential(*layer))
 
         self.layers = th.nn.ModuleList(self.layers)
 
-        
         # Add linear output layer
-        self.output_layer = th.nn.Conv2d(
+        self.output_layer = zero_module(th.nn.Conv2d(
             in_channels=c_out,
             out_channels=out_channels,
-            kernel_size=1 # used to be 3
-        )
+            kernel_size=1 
+        ))
 
         self.final_norm = th.nn.GroupNorm(8, c_out)
 
@@ -308,7 +308,8 @@ class ResidualBlock(th.nn.Module):
         cond_channels (int): Number of channels in the conditioning vector.
         activation (str): Activation function to use.
         norm (bool): Whether to use normalization.
-        n_groups (int): Number of groups for group normalization. # CHECK DEFAULT?
+        n_groups (int): Number of groups for group normalization.
+        use_scale_shift_norm (bool): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`).
     """
 
     def __init__(
@@ -319,20 +320,20 @@ class ResidualBlock(th.nn.Module):
         activation =  th.nn.GELU(),
         norm: bool = False,
         n_groups: int = 8,
+        use_scale_shift_norm: bool = False,
         kernel_size = 3,
-        padding = 1,
-        use_scale_shift_norm: bool = False
+        padding = 1
+        
     ):
         super().__init__()
        
         self.activation = activation
         self.use_scale_shift_norm = use_scale_shift_norm
-        self.cylinder_pad = CylinderPad(padding=padding)
-
-        # padding already provided 
         
-        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
-        self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding= padding))
+        # padding already provided 
+        self.cylinder_pad = CylinderPad(padding=padding)
+        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=0) 
+        self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=0)) 
         # If the number of input channels is not equal to the number of output channels we have to
         # project the shortcut connection
         if in_channels != out_channels:
@@ -352,23 +353,31 @@ class ResidualBlock(th.nn.Module):
 
     def forward(self, x: th.Tensor, emb: th.Tensor):
         # First convolution layer
-        h = self.conv1(self.activation(self.norm1(x)))
+        h = self.activation(self.norm1(x))
+        h = self.cylinder_pad(h)
+        h = self.conv1(h)
+
         emb_out = self.cond_emb(emb)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
+
         if self.use_scale_shift_norm:
             scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = self.norm2(h) * (1 + scale) + shift  
-            h = self.conv2(self.activation(h))
+            h = self.norm2(h) * (1 + scale) + shift  # where we do -1 or +1 doesn't matter
+            h = self.activation(h)
+            h = self.cylinder_pad(h)
+            h = self.conv2(h)
         else:
             h = h + emb_out
-            # Second convolution layer
-            h = self.conv2(self.activation(self.norm2(h)))
-        # Add the shortcut connection and return
+            h = self.activation(self.norm2(h))
+            h = self.cylinder_pad(h)
+            h = self.conv2(h)
+            # Add the shortcut connection and return
+            
         return h + self.shortcut(x)
 
 
-class MiddleBlock(th.nn.Module):
+class MiddleBlock(ConditionedBlock):
     """Middle block It combines a `ResidualBlock`, `AttentionBlock`, followed by another
     `ResidualBlock`.
 
@@ -376,24 +385,28 @@ class MiddleBlock(th.nn.Module):
 
     Args:
         n_channels (int): Number of channels in the input and output.
+        time_embed_dim (int): Number of channels in the conditioning vector.
         has_attn (bool, optional): Whether to use attention block. Defaults to False.
         activation (str): Activation function to use. Defaults to "gelu".
         norm (bool, optional): Whether to use normalization. Defaults to False.
+        use_scale_shift_norm (bool, optional): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`). Defaults to False.
     """
 
     def __init__(
         self,
         in_channels: int,
+        time_embed_dim: int,
         attention: bool = False,
         activation = th.nn.GELU(),
         norm: bool = False,
-        use_scale_shift_norm=False,
+        use_scale_shift_norm: bool = False
          
     ):
         super().__init__()
         self.res1 = ResidualBlock(
             in_channels,
             in_channels,
+            cond_channels=time_embed_dim,
             activation=activation,
             norm = norm,
             use_scale_shift_norm=use_scale_shift_norm)
@@ -403,12 +416,13 @@ class MiddleBlock(th.nn.Module):
         self.res2 = ResidualBlock(
             in_channels,
             in_channels,
+            cond_channels= time_embed_dim,
             activation=activation,
             norm = norm,
-            use_scale_shift_norm=use_scale_shift_norm,)
+            use_scale_shift_norm=use_scale_shift_norm)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        x = self.res1(x)
+    def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
+        x = self.res1(x, emb)
         x = self.attn(x)
-        x = self.res2(x)
+        x = self.res2(x, emb)
         return x
