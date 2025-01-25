@@ -11,6 +11,7 @@ import xarray as xr
 import hydra
 import numpy as np
 import torch as th
+from diffusers.schedulers import DDPMScheduler
 
 sys.path.append("")
 from data.datasets import *
@@ -33,6 +34,7 @@ def run_training(cfg):
 
     :param cfg: The hydra-configuration for the training
     """
+    assert cfg.training.sequence_length > cfg.model.context_size, 'No time steps to predict, increase the prediction window.'
 
     if cfg.seed:
         np.random.seed(cfg.seed)
@@ -47,16 +49,34 @@ def run_training(cfg):
     model = eval(cfg.model.type)(**cfg.model).to(device=device)
     if cfg.verbose:
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"\tModel {cfg.model.name} has {trainable_params} trainable parameters")
+        print(f"\tModel {cfg.model.name} has {trainable_params} trainable parameters\n")
+
+    optimizer = th.optim.Adam(params=model.parameters(), lr=cfg.training.learning_rate)
+    scheduler = th.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=cfg.training.epochs)
+    
+    
+    if cfg.training.type == 'diffusion':
+        #self.ema = ExponentialMovingAverage(self.model, decay=self.hparams.ema_decay)
+        # We use the Diffusion implementation here. Alternatively, one could
+        # implement the denoising manually.
+        betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
+        # scheduling the addition of noise
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=cfg.training.num_refinement_steps + 1,
+            trained_betas=betas,
+            prediction_type="v_prediction", # shouldnt this be epsilon?
+            clip_sample=False,
+        )
+        # Multiplies k before passing to frequency embedding.
+        time_multiplier = 1000 / cfg.training.num_refinement_steps
+
+    
 
     #print(model)
     #exit()
 
     # Initialize training modules
-    criterion = CustomMSELoss() #th.nn.MSELoss()
-
-    optimizer = th.optim.Adam(params=model.parameters(), lr=cfg.training.learning_rate)
-    scheduler = th.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=cfg.training.epochs)
+    criterion = CustomMSELoss() 
 
     # Load checkpoint from file to continue training or initialize training scalars
     checkpoint_path = os.path.join("outputs", cfg.model.name, "checkpoints", f"{cfg.model.name}_last.ckpt")
@@ -131,19 +151,65 @@ def run_training(cfg):
             prognostic = prognostic.to(device=device).split(split_size)
             target = target.to(device=device).split(split_size)
 
+            print("target size", target[0].shape, len(target))
+            print("size prognostic??", prognostic[0].shape, len(prognostic))
+            
+            # target size torch.Size([16, 1, 3, 32, 64]) 
+            #size prescribed?? torch.Size([16, 3, 1, 32, 64]) - takes 3 time steps 
+            #torch.Size([16, 5, 3, 32, 64])
+          
             # Perform optimization step and record outputs
             optimizer.zero_grad()
             for accum_idx in range(len(prognostic)):
-                output = model(
-                    constants=constants[accum_idx] if not constants == None else None,
-                    prescribed=prescribed[accum_idx] if not prescribed == None else None,
-                    prognostic=prognostic[accum_idx]
-                )
+            
+                if cfg.training.type == 'diffusion':
+                    
+                    k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
+                    k_scalar = k.item()
+                    batch_size = prognostic[accum_idx].shape[0]
+                    time_tensor = th.full((batch_size,), k_scalar, device=device)
+                    # constructing the noise factor
+                    noise_factor = noise_scheduler.alphas_cumprod.to(device)[k]
+                    noise_factor = noise_factor.view(-1, *[1 for _ in range(prognostic[accum_idx].ndim - 1)])
+                    signal_factor = 1 - noise_factor
+
+                    target_new = target[accum_idx] 
+                    noise = th.randn_like(target_new)
+                    y_noised = noise_scheduler.add_noise(target_new, noise, k)
+                    
+                    #x_in = th.cat([prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised], axis=1)
+                    # [B, T, C, (F), H, W]
+                    output = model.single_forward(constants[accum_idx], prescribed[accum_idx], prognostic[accum_idx], y_noised, time = time_tensor)
+
+                    # output = model(
+                    #     constants=constants[accum_idx] if not constants == None else None,
+                    #     prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                    #     prognostic=x_in,
+                    #     time = time_tensor * time_multiplier)
+                    
+                    if isinstance(target, tuple):
+                        target = list(target)
+                    
+                    target[accum_idx] = (noise_factor**0.5) * noise - (signal_factor**0.5) * target[accum_idx]
+                    target = tuple(target)
+                
+
+                else:
+
+                    output = model(
+                        constants=constants[accum_idx] if not constants == None else None,
+                        prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                        prognostic=prognostic[accum_idx]
+                    )
                 
                 train_loss = criterion(output, target[accum_idx])
                 train_loss.backward()
                 if cfg.training.clip_gradients:
-                    curr_lr = optimizer.param_groups[-1]["lr"] if scheduler is None else scheduler.get_last_lr()[0]
+                    try:
+                        curr_lr = optimizer.param_groups[-1]["lr"] if scheduler is None else scheduler.get_last_lr()[0]
+                    except Exception:
+                        curr_lr = optimizer.param_groups[-1]["lr"] # 0.001 - fix this for diffusion?
+                        
                     th.nn.utils.clip_grad_norm_(model.parameters(), curr_lr)
                 outputs.append(output.detach().cpu())
                 targets.append(target[accum_idx].detach().cpu())
@@ -164,11 +230,23 @@ def run_training(cfg):
                 prognostic = prognostic.to(device=device).split(split_size)
                 target = target.to(device=device).split(split_size)
                 for accum_idx in range(len(prognostic)):
-                    output = model(
+
+                    if cfg.training.type == 'diffusion':
+                        # implement all diffusion steps
+                        output = model(
                         constants=constants[accum_idx] if not constants == None else None,
                         prescribed=prescribed[accum_idx] if not prescribed == None else None,
-                        prognostic=prognostic[accum_idx]
-                    )
+                        prognostic=prognostic[accum_idx],
+                        noise_scheduler = noise_scheduler)
+
+
+                    else:
+                        output = model(
+                            constants=constants[accum_idx] if not constants == None else None,
+                            prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                            prognostic=prognostic[accum_idx]
+                        )
+
                     outputs.append(output.cpu())
                     targets.append(target[accum_idx].cpu())
 

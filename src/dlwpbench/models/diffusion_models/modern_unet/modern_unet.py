@@ -3,13 +3,48 @@ import einops
 from utils import CylinderPad
 from utils import HEALPixLayer
 from abc import ABC, abstractmethod
+import math 
+
+def fourier_embedding(timesteps: th.Tensor, dim, max_period=10000):
+    r"""Create sinusoidal timestep embeddings.
+
+    Args:
+        timesteps: a 1-D Tensor of N indices, one per batch element.
+                      These may be fractional.
+        dim (int): the dimension of the output.
+        max_period (int): controls the minimum frequency of the embeddings.
+    Returns:
+        embedding (torch.Tensor): [N $\times$ dim] Tensor of positional embeddings.
+    """
+    half = dim // 2
+    
+    freqs = th.exp(-math.log(max_period) * th.arange(start=0, end=half, dtype=th.float32) / half).to(
+        device=timesteps.device
+    )
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = th.cat([th.cos(args), th.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = th.cat([embedding, th.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
 
 
 # Largely based on https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/diffusion/ddpm/unet.py
 # MIT License
+class DiffusionModel(th.nn.Module):
+    @abstractmethod
+    def forward(self, constants, prescribed, prognostic, emb):
+        pass
+        
+
+class ConditionedBlock(th.nn.Module):
+    @abstractmethod
+    def forward(self, x, emb):
+        """Apply the module to `x` given `emb` embedding of time or others."""
 
 
-class DiffModernUNet(th.nn.Module):
+
+class DiffModernUNet(DiffusionModel):
     """
     use_scale_shift_norm (bool): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`). Defaults to False.
     
@@ -30,6 +65,7 @@ class DiffModernUNet(th.nn.Module):
         attention: bool = False,
         norm: bool = False, # groupnorm in each residual block?
         use_scale_shift_norm=True,
+        predict_diff = True,
         
         **kwargs
     ):
@@ -38,13 +74,13 @@ class DiffModernUNet(th.nn.Module):
 
         self.context_size = context_size
         self.mesh = mesh
-        hidden_channels = list(hidden_channels)
-        print("hidden", hidden_channels)
-        time_embed_dim = hidden_channels[0] * 4
+        self.hidden_channels = list(hidden_channels)
+        time_embed_dim = self.hidden_channels[0] * 4
         self.activation = activation
+        self.predict_diff = predict_diff
 
         self.time_embed = th.nn.Sequential(
-            th.nn.Linear(hidden_channels[0], time_embed_dim),
+            th.nn.Linear(self.hidden_channels[0], time_embed_dim),
             self.activation,
             th.nn.Linear(time_embed_dim, time_embed_dim),
         )
@@ -53,7 +89,7 @@ class DiffModernUNet(th.nn.Module):
         
         self.encoder = ModernUNetEncoder(
             in_channels=in_channels,
-            hidden_channels=hidden_channels,
+            hidden_channels=self.hidden_channels,
             time_embed_dim = time_embed_dim,
             activation=activation,
             attention = attention,
@@ -61,7 +97,7 @@ class DiffModernUNet(th.nn.Module):
             use_scale_shift_norm=use_scale_shift_norm
         )
         self.middle = MiddleBlock(
-            in_channels=hidden_channels[-1], 
+            in_channels=self.hidden_channels[-1], 
             #attention = attention,
             time_embed_dim = time_embed_dim,
             norm = norm,
@@ -72,7 +108,7 @@ class DiffModernUNet(th.nn.Module):
       
 
         self.decoder = ModernUNetDecoder(
-            hidden_channels=hidden_channels,
+            hidden_channels=self.hidden_channels,
             out_channels=prognostic_channels,
             time_embed_dim = time_embed_dim,
             activation=activation,
@@ -94,12 +130,70 @@ class DiffModernUNet(th.nn.Module):
         if prescribed is not None: tensors.append(einops.rearrange(prescribed, "b t c h w -> b (t c) h w"))
         if prognostic is not None: tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
         return th.cat(tensors, dim=1)
+    
+    def single_forward(self, constants, prescribed, prognostic, y_noised, time: th.Tensor):
+        # Apply the single diffusion forward function here, that takes the time step as an imput
+        time_multiplier = 1000 / 3 #CHECK
+        # multiply before passing to the fourier embeddings
+        time = time*time_multiplier
+        
+        prognostic_t = th.cat([prognostic, y_noised], axis=1)
 
+        x_t = self._prepare_inputs(
+                constants=constants,
+                prescribed=prescribed,
+                prognostic=prognostic_t
+            )
+
+        fourier = fourier_embedding(time, self.hidden_channels[0]).to(time.device)
+        time_emb = self.time_embed(fourier)
+
+        enc = self.encoder(x_t, emb = time_emb) # this needs to be 16, 2, 3, 32, 64
+    
+        enc2 = self.middle(enc[-1], emb=time_emb)
+        
+        out = self.decoder(x=enc2, skips=enc[::-1], emb=time_emb) 
+
+        return out
+    
+    def diffusion_forward(self, constants, prescribed, prognostic, noise_scheduler):
+        # Apply all diffusion step and return the full output
+        y_noised = th.randn_like(prognostic) 
+
+        for k in range(3): #noise_scheduler.timesteps:
+             
+            print('prognostic shape?', prognostic)
+
+            # Create a 1D tensor of length batch_size, filled with k
+            k = th.full(
+                (prognostic[0].shape[0],),  
+                k,  # Fill value
+                dtype=prognostic[0].dtype, 
+                device=prognostic[0].device
+            ) 
+            print('prognostic shape?', prognostic)
+            
+            pred = self.single_forward(constants, prescribed, prognostic, y_noised, time = k)
+
+            y_noised = noise_scheduler.step(pred, k, y_noised).prev_sample
+
+        y = y_noised
+        
+        if self.predict_diff:
+            print("do we get here??")
+            print(y.shape)
+            print(prognostic.shape)
+            y = y  #+ prognostic[accum_idx][:, -1:] # * difference_weight, wight
+        return y
+
+  
     def forward(
         self,
         constants: th.Tensor = None,
         prescribed: th.Tensor = None,
-        prognostic: th.Tensor = None
+        prognostic: th.Tensor = None,
+        noise_scheduler = None,
+           
     ) -> th.Tensor:
         """
         ...
@@ -108,50 +202,75 @@ class DiffModernUNet(th.nn.Module):
         # constants: [B, 1, C, (F), H, W]
         # prescribed: [B, T, C, (F), H, W]
         # prognostic: [B, T, C, (F), H, W]
+       
+        
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
-        for t in range(self.context_size, prognostic.shape[1]):
-            # For each t I want to store the loss in an array, and see how the prediction skill decreases over time
-          
+        
+        for t in range(self.context_size, prognostic.shape[1] //2):
+        # [C, C, T1, T2, T3] -> prognostic time dimension
+       
             t_start = max(0, t-(self.context_size))
             if t == self.context_size:
                 # Initial condition
-                prognostic_t = prognostic[:, t_start:t]
-                x_t = self._prepare_inputs(
-                    constants=constants,
-                    prescribed=prescribed[:, t_start:t] if prescribed is not None else None,
-                    prognostic=prognostic_t # to forecast
-                )
-            else:
+                prognostic_t = prognostic[:, t_start:t] 
+                prescribed = prescribed[:, t_start:t] if prescribed is not None else None
                 
+            else:
+               
                 # In case of context_size > 1, blend prognostic input with outputs from previous time steps
                 prognostic_t = th.cat(
-                    tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size
-                             th.stack(outs, dim=1)[:, -self.context_size:]],  # Outputs since context_size
+                    tensors=[prognostic[:, t_start:self.context_size],        # Prognostic input before context_size 
+                             th.stack(outs, dim=1)[:, -self.context_size:]],  # Outputs since context_size 
                     dim=1
                 )
-                x_t = self._prepare_inputs(
-                    constants=constants,
-                    prescribed=prescribed[:, t-self.context_size:t] if prescribed is not None else None,
-                    prognostic=prognostic_t
-                )
+                prescribed = prescribed[:, t-self.context_size:t] if prescribed is not None else None
+                
+            out = self.diffusion_forward(constants, prescribed, prognostic, noise_scheduler)
 
-            enc = self.encoder(x_t)
-
-            enc2 = self.middle(enc[-1])
-
-            out = self.decoder(x=enc2, skips=enc[::-1]) 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
-            
-            
+
             out = prognostic_t[:, -1] + out
-
-            
-
+        
             outs.append(out)
 
-       
         return th.stack(outs, dim=1)
+    
+    def predict_next_solution(self, accum_idx, constants, prescribed, prognostic, target, noise_scheduler, time_multiplier):
+            
+            y_noised = th.randn_like(target[accum_idx] )
+            print(y_noised.shape, 'shape of y_noised?') # torch.Size([16, 14, 3, 32, 64]) shape of y_noised?
+            print('shape of target', len(target))
+            # [:, -self.context_size:]
+                           
+            for k in noise_scheduler.timesteps:
+                # Create a 1D tensor of length batch_size, filled with k
+                time = th.full(
+                    (target[accum_idx].shape[0],),  # 1D tensor with batch size length
+                    k,  # Fill value
+                    dtype=target[accum_idx].dtype, 
+                    device=target[accum_idx].device
+                ) 
+                
+                x_in = th.cat([prognostic[accum_idx], y_noised], axis=1)
+
+                pred = self.forward(
+                    constants=constants[accum_idx] if not constants == None else None,
+                    prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                    prognostic=x_in,
+                    time=time * time_multiplier)
+                print("shape of prediction", pred.shape)
+                
+                y_noised = noise_scheduler.step(pred, k, y_noised).prev_sample
+
+            y = y_noised
+            
+            if self.predict_diff:
+                print("do we get here??")
+                print(y.shape)
+                print(prognostic.shape)
+                y = y + prognostic[accum_idx][:, -1:] # * difference_weight, wight
+            return y
 
 
 class ModernUNetEncoder(th.nn.Module):
@@ -181,7 +300,7 @@ class ModernUNetEncoder(th.nn.Module):
 
             # Apply downsampling prior to convolutions if not in top-most layer
             
-            if c_idx > 0: layer.append(th.nn.Conv2d(c_in, c_in, (3, 3), (2, 2), (1, 1)))
+            if c_idx > 0: layer.append(th.nn.Conv2d(c_in, c_in, (3, 3), (2, 2), (1, 1))) 
             #if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
             if mesh == "equirectangular":
                 #layer.append(CylinderPad(padding=1))
@@ -211,11 +330,16 @@ class ModernUNetEncoder(th.nn.Module):
 
         self.layers = th.nn.ModuleList(self.layers)
 
-    def forward(self, x: th.Tensor) -> list:
+    def forward(self, x: th.Tensor, emb:th.Tensor) -> list:
         # Store intermediate model outputs (per layer) for skip connections
         outs = []
         for layer in self.layers:
-            x = layer(x)
+            for module in layer:
+                if isinstance(module, ConditionedBlock):
+                    x = module(x, emb)
+                else:
+                    x = module(x)
+                    
             outs.append(x)
         return outs
     
@@ -289,20 +413,20 @@ class ModernUNetDecoder(th.nn.Module):
 
         self.final_norm = th.nn.GroupNorm(8, c_out)
 
-    def forward(self, x: th.Tensor, skips: list) -> th.Tensor:
-        
+    def forward(self, x: th.Tensor, skips: list, emb: th.Tensor) -> th.Tensor:
         for l_idx, layer in enumerate(self.layers):
             x = th.cat([skips[l_idx], x], dim=1) if l_idx > 0 else x
-            x = layer(x)
+            for module in layer:
+                if isinstance(module, ConditionedBlock):
+                    x = module(x, emb)
+                else:
+                    x = module(x)
+
         return self.output_layer(self.activation(self.final_norm(x)))
-         
+    
+    
 
 # BLOCKS
-class ConditionedBlock(th.nn.Module):
-    @abstractmethod
-    def forward(self, x, emb):
-        """Apply the module to `x` given `emb` embedding of time or others."""
-
     
 def zero_module(module):
     """Zero out the parameters of a module and return it."""
@@ -373,6 +497,7 @@ class ResidualBlock(ConditionedBlock):
 
     def forward(self, x: th.Tensor, emb: th.Tensor):
         # First convolution layer
+        
         h = self.activation(self.norm1(x))
         h = self.cylinder_pad(h)
         h = self.conv1(h)
