@@ -179,7 +179,7 @@ def run_training(cfg):
                     
                     #x_in = th.cat([prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised], axis=1)
                     # [B, T, C, (F), H, W]
-                    output = model.single_forward(constants[accum_idx], prescribed[accum_idx], prognostic[accum_idx], y_noised, time = time_tensor)
+                    output = model.single_forward(constants[accum_idx], prescribed[accum_idx][:, 0:cfg.model.context_size], prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised, time = time_tensor)
 
                     # output = model(
                     #     constants=constants[accum_idx] if not constants == None else None,
