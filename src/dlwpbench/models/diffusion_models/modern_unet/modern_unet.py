@@ -2,6 +2,8 @@ import torch as th
 import einops
 from utils import CylinderPad
 from utils import HEALPixLayer
+from abc import ABC, abstractmethod
+
 
 # Largely based on https://github.com/labmlai/annotated_deep_learning_paper_implementations/blob/master/labml_nn/diffusion/ddpm/unet.py
 # MIT License
@@ -36,9 +38,13 @@ class DiffModernUNet(th.nn.Module):
 
         self.context_size = context_size
         self.mesh = mesh
-        time_embed_dim = hidden_channels * 4
+        hidden_channels = list(hidden_channels)
+        print("hidden", hidden_channels)
+        time_embed_dim = hidden_channels[0] * 4
+        self.activation = activation
+
         self.time_embed = th.nn.Sequential(
-            th.nn.Linear(hidden_channels, time_embed_dim),
+            th.nn.Linear(hidden_channels[0], time_embed_dim),
             self.activation,
             th.nn.Linear(time_embed_dim, time_embed_dim),
         )
@@ -219,6 +225,7 @@ class ModernUNetDecoder(th.nn.Module):
         self,
         hidden_channels: list = [64, 128, 256, 1024],
         out_channels: int = 2,
+        time_embed_dim = 1024,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
         mesh: str = "equirectangular",
@@ -242,6 +249,7 @@ class ModernUNetDecoder(th.nn.Module):
                 layer.append(ResidualBlock(
                     in_channels=c_in_ , 
                     out_channels=c_out,
+                    cond_channels=time_embed_dim,
                     kernel_size= 3,
                     padding = 1,
                     use_scale_shift_norm=use_scale_shift_norm))
