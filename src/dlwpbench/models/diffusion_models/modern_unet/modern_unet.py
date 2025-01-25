@@ -7,7 +7,7 @@ from utils import HEALPixLayer
 # MIT License
 
 
-class ModernUNet(th.nn.Module):
+class DiffModernUNet(th.nn.Module):
     """
     use_scale_shift_norm (bool): Whether to use scale and shift approach to conditoning (also termed as `AdaGN`). Defaults to False.
     
@@ -27,10 +27,11 @@ class ModernUNet(th.nn.Module):
         mesh: str = "equirectangular",
         attention: bool = False,
         norm: bool = False, # groupnorm in each residual block?
+        use_scale_shift_norm=True,
         
         **kwargs
     ):
-        super(ModernUNet, self).__init__()
+        super(DiffModernUNet, self).__init__()
         if isinstance(activation, str): activation = eval(activation)
 
         self.context_size = context_size
@@ -50,7 +51,8 @@ class ModernUNet(th.nn.Module):
             time_embed_dim = time_embed_dim,
             activation=activation,
             attention = attention,
-            mesh=mesh
+            mesh=mesh,
+            use_scale_shift_norm=use_scale_shift_norm
         )
         self.middle = MiddleBlock(
             in_channels=hidden_channels[-1], 
@@ -68,7 +70,8 @@ class ModernUNet(th.nn.Module):
             out_channels=prognostic_channels,
             time_embed_dim = time_embed_dim,
             activation=activation,
-            mesh=mesh
+            mesh=mesh,
+            use_scale_shift_norm=use_scale_shift_norm
         )
 
     def _prepare_inputs(
@@ -156,7 +159,8 @@ class ModernUNetEncoder(th.nn.Module):
         time_embed_dim = 1024,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
-        mesh: str = "equirectangular"
+        mesh: str = "equirectangular",
+        use_scale_shift_norm=True,
     ):
         super(ModernUNetEncoder, self).__init__()
         self.layers = []
@@ -182,7 +186,8 @@ class ModernUNetEncoder(th.nn.Module):
                     out_channels=c_out,
                     cond_channels=time_embed_dim,
                     kernel_size= 3,
-                    padding = 1))
+                    padding = 1,
+                    use_scale_shift_norm=use_scale_shift_norm))
                   
                 # (4) Attention
                 layer.append(self.attn)
@@ -216,7 +221,8 @@ class ModernUNetDecoder(th.nn.Module):
         out_channels: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
-        mesh: str = "equirectangular"
+        mesh: str = "equirectangular",
+        use_scale_shift_norm=True,
     ):
         super(ModernUNetDecoder, self).__init__()
         self.layers = []
@@ -237,7 +243,8 @@ class ModernUNetDecoder(th.nn.Module):
                     in_channels=c_in_ , 
                     out_channels=c_out,
                     kernel_size= 3,
-                    padding = 1))
+                    padding = 1,
+                    use_scale_shift_norm=use_scale_shift_norm))
                 layer.append(self.attn)
                     
                 # elif mesh == "healpix":
@@ -283,6 +290,11 @@ class ModernUNetDecoder(th.nn.Module):
          
 
 # BLOCKS
+class ConditionedBlock(th.nn.Module):
+    @abstractmethod
+    def forward(self, x, emb):
+        """Apply the module to `x` given `emb` embedding of time or others."""
+
     
 def zero_module(module):
     """Zero out the parameters of a module and return it."""
@@ -299,7 +311,7 @@ class AttentionBlockl(th.nn.Module):
         pass
 
 
-class ResidualBlock(th.nn.Module):
+class ResidualBlock(ConditionedBlock):
     """Wide Residual Blocks used in modern Unet architectures.
 
     Args:
@@ -320,7 +332,7 @@ class ResidualBlock(th.nn.Module):
         activation =  th.nn.GELU(),
         norm: bool = False,
         n_groups: int = 8,
-        use_scale_shift_norm: bool = False,
+        use_scale_shift_norm: bool = True,
         kernel_size = 3,
         padding = 1
         
@@ -399,7 +411,7 @@ class MiddleBlock(ConditionedBlock):
         attention: bool = False,
         activation = th.nn.GELU(),
         norm: bool = False,
-        use_scale_shift_norm: bool = False
+        use_scale_shift_norm: bool = True
          
     ):
         super().__init__()
