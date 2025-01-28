@@ -67,6 +67,7 @@ class DiffModernUNet(DiffusionModel):
         norm: bool = False, # groupnorm in each residual block?
         use_scale_shift_norm=True,
         predict_diff = True,
+        num_refinement_step = 5,
         
         **kwargs
     ):
@@ -79,6 +80,7 @@ class DiffModernUNet(DiffusionModel):
         time_embed_dim = self.hidden_channels[0] * 4
         self.activation = activation
         self.predict_diff = predict_diff
+        self.num_refinement_step = num_refinement_step
 
         self.time_embed = th.nn.Sequential(
             th.nn.Linear(self.hidden_channels[0], time_embed_dim),
@@ -133,10 +135,10 @@ class DiffModernUNet(DiffusionModel):
         if prognostic is not None: tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
         return th.cat(tensors, dim=1)
     
-    def single_forward(self, constants, prescribed, prognostic, y_noised, time: th.Tensor):
+    def single_forward(self, constants, prescribed, prognostic, y_noised, time):
         # Apply the single diffusion forward function here, that takes the time step as an imput
         
-        time_multiplier = 1000 / 3 #CHECK
+        time_multiplier = 1000 / self.num_refinement_step 
         # multiply before passing to the fourier embeddings
         time = time*time_multiplier
         

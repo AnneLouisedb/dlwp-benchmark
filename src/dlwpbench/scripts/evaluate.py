@@ -25,7 +25,7 @@ import dask.array as da
 
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from diffusers.schedulers import DDPMScheduler
 sys.path.append("")
 from data.datasets import *
 from data.processing.healpix_mapping import HEALPixRemap
@@ -52,21 +52,44 @@ MODEL_NAME_PLOT_ARGS = {
     "mgn32m_l8_d470_v0": {"c": "blueviolet", "ls": "solid", "label": "MeshGraphNet (32M)"},
     "gcast16m_p4_b1_d565_v2": {"c": "darkblue", "ls": "solid", "label": "GraphCast (16M)"},
 }
-
-
 def make_biweekly_inits(
     start: str = "2017-01-01T11:00:00.000000000",
     end: str = "2018-12-31T11:00:00.000000000",
     sequence_length: int = 15,
     timedelta: int = 1 
 ):
-    times1 = pd.date_range(start=start,
-                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
-                           freq='7D')
-    times2 = pd.date_range(start=pd.Timestamp(start) + pd.Timedelta(days=3),
-                           end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
-                           freq='7D')
-    return times1.append(times2).sort_values().to_numpy()
+    # Convert start and end to pandas Timestamp objects with UTC timezone
+    start_date = pd.Timestamp(start, tz='UTC')  #+ pd.Timedelta(hours=sequence_length*timedelta*24)
+    end_date = pd.Timestamp(end, tz='UTC') - pd.Timedelta(hours=sequence_length*timedelta*24)
+    
+    # Generate date range for Mondays at 11:00 UTC
+    mondays = pd.date_range(start=start_date, end=end_date, freq='W-MON', tz='UTC') #.map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+    
+    # Generate date range for Thursdays at 11:00 UTC
+    thursdays = pd.date_range(start=start_date, end=end_date, freq='W-THU', tz='UTC')#.map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+    
+    # Combine Mondays and Thursdays
+    all_dates = mondays.union(thursdays).sort_values()
+
+    naive_timestamp = all_dates.tz_localize(None)
+
+    return naive_timestamp.to_numpy()
+
+
+# def make_biweekly_inits(
+#     start: str = "2017-01-01T11:00:00.000000000",
+#     end: str = "2018-12-31T11:00:00.000000000",
+#     sequence_length: int = 15,
+#     timedelta: int = 1 
+# ):
+#     # I need only mondays and thursdays
+#     times1 = pd.date_range(start=start,
+#                            end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
+#                            freq='7D')
+#     times2 = pd.date_range(start=pd.Timestamp(start) + pd.Timedelta(days=3),
+#                            end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
+#                            freq='7D')
+#     return times1.append(times2).sort_values().to_numpy()
 
 
 def remap(cfg, data, name=None):
@@ -170,6 +193,15 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
     print("loaded dataset")
     print()
 
+    if cfg.training.type == 'diffusion':
+        betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
+        # scheduling the addition of noise
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=cfg.training.num_refinement_steps + 1,
+            trained_betas=betas,
+            prediction_type="v_prediction", # shouldnt this be "epsilon"
+            clip_sample=False)
+
     # Evaluate (without gradients): iterate over all test samples
     with th.no_grad():
         inits = list()
@@ -181,19 +213,28 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             constants = constants.to(device=device) if not constants.isnan().any() else None
             prescribed = prescribed.to(device=device) if not prescribed.isnan().any() else None
             prognostic = prognostic.to(device=device)
-
             target = target.to(device=device)
-            output = model(
-                constants=constants if not constants == None else None,
-                prescribed=prescribed if not prescribed == None else None,
-                prognostic=prognostic
-            )
+
+            if cfg.training.type == 'diffusion':
+                output = model(
+                    constants=constants if not constants == None else None,
+                    prescribed=prescribed if not prescribed == None else None,
+                    prognostic=prognostic,
+                    noise_scheduler = noise_scheduler,
+                    target = target)
+            else:
+
+                output = model(
+                    constants=constants if not constants == None else None,
+                    prescribed=prescribed if not prescribed == None else None,
+                    prognostic=prognostic
+                )
             inits.append(prognostic[:, 0].cpu())
             outputs.append(output.cpu())
             targets.append(target.cpu())
             # remove
-            print("break loop")
-            break
+            
+           
         inits = th.cat(inits).numpy()
         outputs = th.cat(outputs).numpy()
         targets = th.cat(targets).numpy()
@@ -621,8 +662,7 @@ def run_evaluations(
     :param device: The device where the evaluations are performed
     """
 
-    wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_swintransformer") # replace with model name
-
+    
     performance_dict = {}
     dataset_hpx = None
     dataset_cyl = None
@@ -640,6 +680,9 @@ def run_evaluations(
             cfg.device = device
             if batch_size: cfg.testing.batch_size = batch_size
             if sequence_length: cfg.testing.sequence_length = sequence_length
+
+        wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_{cfg.model.name}") # replace with model name
+
 
         # Generate forecasts if they do not exist and load them
         output_fname = "outputs.nc"
@@ -671,17 +714,17 @@ def run_evaluations(
         # Add the current model's datasets to the performance dict for cross model evaluation later
         performance_dict[cfg.model.name] = dict(inits=ds_inits, outputs=ds_outputs, targets=ds_targets)
 
-        print("(4) Generating Videos")
+        # print("(4) Generating Videos")
 
-        # Generate video showcasing model forecast
-        if not os.path.exists(os.path.join(file_path, "videos")) or overide:
-            generate_mp4(
-                cfg=cfg,
-                ds_outputs=ds_outputs,
-                ds_targets=ds_targets,
-                file_path=file_path,
-                normalize=normalize_video
-            )
+        # # Generate video showcasing model forecast
+        # if not os.path.exists(os.path.join(file_path, "videos")) or overide:
+        #     generate_mp4(
+        #         cfg=cfg,
+        #         ds_outputs=ds_outputs,
+        #         ds_targets=ds_targets,
+        #         file_path=file_path,
+        #         normalize=normalize_video
+        #     )
 
         # Clear RAM by deleting the datasets used here and calling the garbage collector subsequently
         del ds_inits, ds_outputs, ds_targets
@@ -697,7 +740,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/swintransformer'], #unet'], #=["configs"],
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/MUnet_w_diff'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")
