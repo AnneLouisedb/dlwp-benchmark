@@ -538,11 +538,11 @@ class ModernUNetDecoder(th.nn.Module):
 
         
         # Add linear output layer
-        self.output_layer = th.nn.Conv2d(
+        self.output_layer = zero_module(th.nn.Conv2d(
             in_channels=c_out,
             out_channels=out_channels,
-            kernel_size=1 # used to be 3
-        )
+            kernel_size=1 
+        ))
 
         self.final_norm = th.nn.GroupNorm(8, c_out)
 
