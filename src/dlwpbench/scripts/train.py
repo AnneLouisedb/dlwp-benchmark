@@ -258,6 +258,8 @@ def run_training(cfg):
                 prescribed = prescribed.to(device=device).split(split_size) if not prescribed.isnan().any() else None
                 prognostic = prognostic.to(device=device).split(split_size)
                 target = target.to(device=device).split(split_size)
+                print("target shape", target)
+                print(target)
                 for accum_idx in range(len(prognostic)):
 
                     if cfg.training.type == 'diffusion':

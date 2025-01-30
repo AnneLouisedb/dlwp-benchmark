@@ -1,0 +1,14 @@
+type: DiffModernUNet
+name: modern_unet_pde_refiner
+constant_channels: 4
+prescribed_channels: 1
+prognostic_channels: 3  
+hidden_channels: [64, 32, 16] #, 8] 
+activation: th.nn.GELU()  
+context_size: 2 
+norm: true 
+use_scale_shift_norm: true 
+num_refinement_step: 5
+        
+
+

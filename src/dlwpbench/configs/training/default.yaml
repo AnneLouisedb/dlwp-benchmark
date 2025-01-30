@@ -1,10 +1,12 @@
 epochs: 30
+type: regular
 learning_rate: 0.001
 clip_gradients: True
-batch_size: 16
+batch_size: 32
 gradient_accumulation_steps: 1
 noise: 0.0
-sequence_length: 5
+sequence_length: 3 #5 #3 #Number of autoregressive steps
 save_model: true
 continue_training: false
 dataset_name: ${data.training_set_name}
+optimizer_weight_decay: 1e-5

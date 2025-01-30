@@ -1,0 +1,15 @@
+epochs: 30
+type: diffusion
+learning_rate: 0.0001  # 1e-4 in PDE-REFINER   #
+clip_gradients: True
+batch_size: 32 #64 #16
+gradient_accumulation_steps: 1
+noise: 0.0
+sequence_length: 3 #2 total number of steps in the forecast including the context
+save_model: true
+continue_training: false
+dataset_name: ${data.training_set_name}
+num_refinement_steps: 1000
+min_noise_std: 4e-4  #2e-7 - er incresed the std for noise 
+predict_difference: true
+optimizer_weight_decay: 1e-5

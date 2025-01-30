@@ -11,8 +11,8 @@ import xarray as xr
 
 
 if __name__ == "__main__":
-
-    src_path = os.path.join("data", "netcdf", "weatherbench")
+    src_path = '/home/adboer/dlwp-benchmark/src/dlwpbench/to_convert'
+    #src_path = os.path.join("data", "netcdf", "weatherbench")
     dir_paths = glob.glob(os.path.join(src_path, "*"))
 
     for dir_path in dir_paths:

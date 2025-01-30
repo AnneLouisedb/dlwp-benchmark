@@ -28,5 +28,5 @@ prescribed_variable_names:
 prognostic_variable_names_and_levels:
   #sst: []
   msl: []
-  stream: [250, 500] # this is stream500
-  #stream250: []
+  stream: [250, 500] 
+  

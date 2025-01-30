@@ -19,6 +19,7 @@ import numpy as np
 import torch as th
 import pandas as pd
 import xarray as xr
+
 from omegaconf import DictConfig
 from dask.diagnostics import ProgressBar
 import dask.array as da
@@ -53,8 +54,8 @@ MODEL_NAME_PLOT_ARGS = {
     "gcast16m_p4_b1_d565_v2": {"c": "darkblue", "ls": "solid", "label": "GraphCast (16M)"},
 }
 def make_biweekly_inits(
-    start: str = "2017-01-01T11:00:00.000000000",
-    end: str = "2018-12-31T11:00:00.000000000",
+    start: str = "2017-01-01T00:00:00.000000000",
+    end: str = "2018-12-31T00:00:00.000000000",
     sequence_length: int = 15,
     timedelta: int = 1 
 ):
@@ -74,23 +75,6 @@ def make_biweekly_inits(
     naive_timestamp = all_dates.tz_localize(None)
 
     return naive_timestamp.to_numpy()
-
-
-# def make_biweekly_inits(
-#     start: str = "2017-01-01T11:00:00.000000000",
-#     end: str = "2018-12-31T11:00:00.000000000",
-#     sequence_length: int = 15,
-#     timedelta: int = 1 
-# ):
-#     # I need only mondays and thursdays
-#     times1 = pd.date_range(start=start,
-#                            end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
-#                            freq='7D')
-#     times2 = pd.date_range(start=pd.Timestamp(start) + pd.Timedelta(days=3),
-#                            end=pd.Timestamp(end) - pd.Timedelta(hours=sequence_length*timedelta*24),
-#                            freq='7D')
-#     return times1.append(times2).sort_values().to_numpy()
-
 
 def remap(cfg, data, name=None):
     latitudes = 32
@@ -151,6 +135,8 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
 
+    print('CFG data', cfg.data)
+
     # Set up model
     model = eval(cfg.model.type)(**cfg.model).to(device=device)
     if cfg.verbose:
@@ -181,12 +167,14 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             sequence_length=cfg.testing.sequence_length,
             init_dates=init_dates
         )
+        
+        #
         #if "hpx" in file_path: dataset_dict["hpx"] = dataset
         #else: dataset_dict["cyl"] = dataset
     
-    dataloader = th.utils.data.DataLoader(
+    dataloader1 = th.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=cfg.testing.batch_size,
+        batch_size=32,# cfg.testing.batch_size,
         shuffle=False,
         num_workers=0
     )
@@ -201,14 +189,14 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             trained_betas=betas,
             prediction_type="v_prediction", # shouldnt this be "epsilon"
             clip_sample=False)
-
+        
     # Evaluate (without gradients): iterate over all test samples
     with th.no_grad():
         inits = list()
         outputs = list()
         targets = list()
-        for constants, prescribed, prognostic, target in tqdm(dataloader, desc="Generating forecasts"):
-            print("LOADING FORECAST DATA")
+        for constants, prescribed, prognostic, target in tqdm(dataloader1, desc="Generating forecasts"):
+                     
             # Load data and generate predictions
             constants = constants.to(device=device) if not constants.isnan().any() else None
             prescribed = prescribed.to(device=device) if not prescribed.isnan().any() else None
@@ -445,6 +433,7 @@ def generate_mp4(
                         "-hide_banner",
                         "-loglevel", "error",
                         "-r", "15",
+                        "-vf", "setpts=1.5*PTS",
                         "-pattern_type", "glob",
                         "-i", f"{os.path.join(file_path, 'frames', '*.png')}",
                         "-vcodec", "libx264",
@@ -452,7 +441,11 @@ def generate_mp4(
                         "-pix_fmt", "yuv420p",
                         "-y",
                         f"{os.path.join(file_path, f'{vname}.mp4')}"])
-    
+        
+        video_path = os.path.join(file_path, f'{vname}.mp4')
+        wandb.log({f"video/{cfg.model.name}": wandb.Video(video_path, fps=15, format="mp4")})
+        print("VIDEO")
+        
     # Cleaning up
     shutil.rmtree(os.path.join(file_path, "frames"))
 
@@ -501,6 +494,179 @@ def plot_acc_over_time(
         
         plt.close()
 
+
+def plot_relative_improvement(cfg,performance_dict,file_path_comparison,plot_title = 'RMSE of Model vs. EC46'):
+
+    file_path = "./plots"
+    os.makedirs(file_path, exist_ok=True)
+    dt = cfg.data.timedelta * 24  # Days!
+
+    vnames = list(performance_dict[list(performance_dict.keys())[0]]["outputs"].keys())
+    for vname in vnames:
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        rmse_max = -np.infty
+        for m_idx, model_name in enumerate(performance_dict):
+            ds_comparison = xr.open_dataset(os.path.join("outputs", model_name, "evaluation", file_path_comparison))
+            ds_comparison = ds_comparison.to_dataframe()
+            ds_comparison = ds_comparison.reset_index()
+            ds_comparison = ds_comparison.groupby('sample').first().reset_index()
+
+            rmse = ds_comparison["rmse_model"]
+            rmse_ec46 = ds_comparison["rmse_ec46"]
+
+            if model_name in list(MODEL_NAME_PLOT_ARGS.keys()): kwargs = MODEL_NAME_PLOT_ARGS[model_name]
+            else: kwargs = {"label": model_name}
+            x = np.arange(len(ds_comparison))
+            width = 0.35
+
+            ax.bar(x - width/2, ds_comparison["rmse_model"], width, label='RMSE Model')
+            ax.bar(x + width/2, ds_comparison["rmse_ec46"], width, label='RMSE EC46')
+
+            rmse_max = max(rmse_max, rmse.max(), rmse_ec46.max())
+
+        ax.grid()
+        ax.set_title("RMSE Comparison: Model vs EC46")
+        ax.set_ylabel("RMSE")
+        ax.set_xlabel('Sample')
+        ax.set_xlim([x[0], x[-1]])
+        ax.legend(ncol=2, fontsize=9)
+        fig.suptitle(plot_title)
+        fig.tight_layout()
+        fig.savefig(os.path.join(file_path, f"rmse_plot_{vname}.pdf"))
+        wandb.log({
+            f"RMSE_comparison": wandb.Image(fig) })
+
+    plt.close()
+
+
+    
+def plot_relative_improvement(cfg, performance_dict, file_path_comparison, plot_title='RMSE of Models vs. EC46'):
+    file_path = "./plots"
+    os.makedirs(file_path, exist_ok=True)
+   
+    vnames = list(performance_dict[list(performance_dict.keys())[0]]["outputs"].keys())
+    for vname in vnames:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+        rmse_max = -np.infty
+        
+        model_names = list(performance_dict.keys())
+        num_models = len(model_names)
+        
+        x = np.arange(num_models + 1)  # +1 for EC46
+        width = 1
+        
+        rmse_models = []
+        rmse_models_std = []
+        rmse_ec46 = None
+        rmse_ec46_std = None
+
+
+        color_dict = {
+            'model1': 'blue',
+            'model2': 'orange',
+            'model3': 'green',
+            'model4': 'grey'}
+
+        for m_idx, model_name in enumerate(model_names):
+            ds_comparison = xr.open_dataset(os.path.join("outputs", model_name, "evaluation", file_path_comparison))
+            ds_comparison = ds_comparison.to_dataframe()
+            ds_comparison = ds_comparison.reset_index()
+            ds_comparison = ds_comparison.groupby('sample').first().reset_index()
+
+            rmse_model = ds_comparison["rmse_model"].mean()
+            rmse_model_std = ds_comparison["rmse_model"].std()
+            rmse_models.append(rmse_model)
+            rmse_models_std.append(rmse_model_std)
+            
+            if rmse_ec46 is None:
+                rmse_ec46 = ds_comparison["rmse_ec46"].mean()
+                rmse_ec46_std = ds_comparison["rmse_ec46"].std()
+
+            rmse_max = max(rmse_max, rmse_model + rmse_model_std, rmse_ec46 + rmse_ec46_std)
+
+            color = list(color_dict.values())[m_idx]
+            ax.bar(x[m_idx], rmse_model, width, yerr=rmse_model_std, align='edge', color=color, label=model_name, capsize=5)
+
+        # Plot EC46 bar with error bar
+        ax.bar(x[-1], rmse_ec46, width, yerr=rmse_ec46_std, align='edge',label='RMSE EC46', capsize=5)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names + ['EC46'], rotation=45, ha='right')
+
+        ax.grid(axis='y')
+        ax.set_title("RMSE Comparison: Models vs EC46")
+        ax.set_ylabel("RMSE")
+        ax.set_ylim(0, rmse_max * 1.1)  # Add 10% padding to the top
+        ax.legend(fontsize=9)
+        fig.suptitle(plot_title)
+        fig.tight_layout()
+        fig.savefig(os.path.join(file_path, f"rmse_plot_{vname}.pdf"))
+        wandb.log({
+            f"RMSE_comparison_{vname}": wandb.Image(fig)
+        })
+
+    plt.close()
+
+
+def plot_skill_per_day(cfg,performance_dict,file_path_comparison,plot_title): 
+    color_dict = {
+            'model1': 'blue',
+            'model2': 'orange',
+            'model3': 'green',
+            'model4': 'grey'}
+    colors =  list(color_dict.values())
+
+    months = [1,2,3,4,5,6,7,8,9,10,11,12] 
+    years = [2017]
+
+    caption = f"Tested on biweekly values in months: {str(months)}; year: {str(years)}"
+
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    fig.text(0.5, 0.01, caption, ha='center', va='bottom', fontsize=10, style='italic')
+    model_names = list(performance_dict.keys())
+
+    for m_idx, model_name in enumerate(model_names):
+        file_path = os.path.join("outputs", model_name, "evaluation")
+        
+        all_skill_scores = []
+
+        for year in years:
+            for month in months:
+                file_path_comparison = os.path.join(file_path, f"comparison_with_ec46_{str(month)}-{str(year)}.nc")
+                if os.path.exists(file_path_comparison):
+                    df = xr.open_dataset(file_path_comparison)
+                    skill_score = df.relative_per_day
+                    all_skill_scores.append(skill_score)
+
+        if all_skill_scores:
+            combined_skill_scores = xr.concat(all_skill_scores, dim='sample')
+            mean_skill_score = combined_skill_scores.mean(dim='sample')
+            
+            time_values = np.arange(1, mean_skill_score.shape[1] + 1)
+            color = colors[m_idx]
+            
+            ax.plot(time_values, mean_skill_score[0], color=color, label=model_name, linewidth=2)
+
+        ax.set_title("Relative Improvement vs. Time for Each Sample")
+        ax.set_xlabel("Day")
+        ax.set_ylabel("Relative Improvement (%)")
+
+        # Add a horizontal line at y=0
+        ax.axhline(0, color='red', linestyle='--', label='No Improvement')
+
+        # Add legend
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+        # Add grid
+        ax.grid(True, linestyle=':', alpha=0.7)
+
+    # Adjust layout
+    fig.tight_layout()
+    wandb.log({
+            f"relativeimprovement_per_day": wandb.Image(fig, caption=caption) })
+    plt.close()
+
+      
 
 def plot_rmse_over_time(
     cfg: DictConfig,
@@ -602,6 +768,8 @@ def compute_metrics(
         accs = nom/denom
         accs.to_netcdf(os.path.join(file_path, "accs.nc"))
 
+       
+
     #
     # Compute annually averaged RMSE for U10
 
@@ -629,7 +797,7 @@ def compute_metrics(
         avg_out_ = avg_out.sel(lat=slice(-55, -45))
         rmse_south_westerlies = np.sqrt(((avg_out_-avg_tar_)**2).mean())
         rmse_south_westerlies.to_netcdf(file_path_)
-
+        
         # Clear memory
         del avg_tar, avg_tar_, avg_out, avg_out_
 
@@ -643,7 +811,76 @@ def compute_metrics(
         rmse = np.sqrt(((avg_out-avg_tar)**2).mean())
         rmse.to_netcdf(file_path_)
         del avg_tar, avg_out
+    
+    # Add new metric for comparison with EC46
+    #file_path_ec46 = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/EC46/msl/EC46_Oct.nc'
+    ec46_folder = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/EC46/msl'
+    
+    # months = ['january', 'february', 'march', 'april', 'may', 'june', 
+    #           'july', 'august', 'september', 'october', 'november', 'december']
+    
+    #months = ['january', 'february', 'march', 'april', 'october']
+    months = [1,2,3,4,5,6,7,8,9,10,11,12] 
+    years = [2017]
+    
+    for year in years:
+        for month in months:
+            file_path_comparison = os.path.join(file_path, f"comparison_with_ec46_{str(month)}-{str(year)}.nc")
+            ec46_file = os.path.join(ec46_folder, f"{month}-{year}.nc")
 
+            if not os.path.exists(file_path_comparison) or overide:
+                print("\tComputing comparison with EC46 for October 2017...")
+                
+                # Load EC46 data
+                ds_ec46 = xr.open_dataset(ec46_file)
+                
+                # Select October 2017 from your model outputs and targets
+                ds_outputs_oct2017 = ds_outputs.sel(sample=((ds_outputs.sample.dt.year == year) & (ds_outputs.sample.dt.month == month)))
+                ds_targets_oct2017 = ds_targets.sel(sample=((ds_targets.sample.dt.year == year) & (ds_targets.sample.dt.month == month)))
+                
+                # Ensure all datasets have the same coordinates
+                ds_ec46 = ds_ec46.reindex_like(ds_outputs_oct2017)
+                
+                # Compute RMSE between your model and targets
+                rmse_model = np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+                
+                # Compute RMSE between EC46 and targets
+                rmse_ec46 = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+
+                diff = np.sqrt(((ds_ec46 - ds_outputs_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+
+                # Compute relative improvement
+                relative_improvement = (rmse_ec46 - rmse_model) / rmse_ec46 * 100
+
+                # Compute RMSE between EC46 and targets
+                # Compute RMSE between your model and targets
+
+                rmse_model_raw= np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+                rmse_ec46_raw = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+                
+                # Compute relative improvement
+                relative_improvement_raw = (rmse_ec46_raw - rmse_model_raw) / rmse_ec46_raw * 100
+            
+                # Create a dataset with the comparison results
+                ds_comparison = xr.Dataset({
+                    "rmse_model": rmse_model, 
+                    "rmse_ec46": rmse_ec46.to_dataarray(), 
+                    "relative_improvement": relative_improvement.to_dataarray(), 
+                    'difference_model_ec': diff.to_dataarray(),
+                    'relative_per_day': relative_improvement_raw.to_dataarray()
+                })
+
+                # Save the comparison results
+                ds_comparison.to_netcdf(file_path_comparison)
+                
+                print(f"\tComparison results saved to {file_path_comparison}")
+                # Assuming your DataArray is named `skill_score`
+
+
+        
+
+    
+       
 
 def run_evaluations(
     configuration_dir_list: str,
@@ -666,7 +903,10 @@ def run_evaluations(
     performance_dict = {}
     dataset_hpx = None
     dataset_cyl = None
+    #overide = True
+    wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_all_models") # replace with model name
 
+    
     # Iterate over all configuration directories and perform evaluations
     for configuration_dir in configuration_dir_list:
         
@@ -681,7 +921,7 @@ def run_evaluations(
             if batch_size: cfg.testing.batch_size = batch_size
             if sequence_length: cfg.testing.sequence_length = sequence_length
 
-        wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_{cfg.model.name}") # replace with model name
+        #wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_{cfg.model.name}") # replace with model name
 
 
         # Generate forecasts if they do not exist and load them
@@ -704,6 +944,8 @@ def run_evaluations(
         ds_outputs = xr.open_dataset(os.path.join(file_path, "outputs.nc")).isel(time=slice(0, 1460))
         ds_targets = xr.open_dataset(os.path.join(file_path, "targets.nc"))
         print("(3) Computing Metrics")
+
+        
         # Compute forecast error metrics if they don't yet exist and write results to file
         if not os.path.exists(os.path.join(file_path, "rmses.nc")) or overide:
             
@@ -714,17 +956,16 @@ def run_evaluations(
         # Add the current model's datasets to the performance dict for cross model evaluation later
         performance_dict[cfg.model.name] = dict(inits=ds_inits, outputs=ds_outputs, targets=ds_targets)
 
-        # print("(4) Generating Videos")
+        print("(4) Generating Videos")
 
-        # # Generate video showcasing model forecast
-        # if not os.path.exists(os.path.join(file_path, "videos")) or overide:
-        #     generate_mp4(
-        #         cfg=cfg,
-        #         ds_outputs=ds_outputs,
-        #         ds_targets=ds_targets,
-        #         file_path=file_path,
-        #         normalize=normalize_video
-        #     )
+        # Generate video showcasing model forecast
+       #if not os.path.exists(os.path.join(file_path, "videos")) or overide:
+        generate_mp4(
+                cfg=cfg,
+                ds_outputs=ds_outputs,
+                ds_targets=ds_targets,
+                file_path=file_path,
+                normalize=normalize_video)
 
         # Clear RAM by deleting the datasets used here and calling the garbage collector subsequently
         del ds_inits, ds_outputs, ds_targets
@@ -734,13 +975,15 @@ def run_evaluations(
     #if overide: plot_rmse_over_time(cfg-cfg, performance_dict=performance_dict)
     plot_rmse_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
     plot_acc_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
+    plot_relative_improvement(cfg,performance_dict,"comparison_with_ec46_october2017.nc",plot_title)
+    plot_skill_per_day(cfg, performance_dict,"comparison_with_ec46_october2017.nc",plot_title)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/MUnet_w_diff'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/unet_inverted','outputs/modernunet_inverted', 'outputs/MUnet_w_diff'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")
