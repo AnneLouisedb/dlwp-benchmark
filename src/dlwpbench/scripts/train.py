@@ -18,6 +18,7 @@ from data.datasets import *
 from models import *
 import utils.utils as utils
 import wandb
+import einops
 
 import matplotlib.pyplot as plt
 import io
@@ -56,34 +57,14 @@ def run_training(cfg):
     scheduler = th.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=cfg.training.epochs)
 
     if cfg.training.type == 'dyfusion':
-        # want early steps to have a smal noise factor and later steps to have a strong noise factor
-        # how to init the betas?
-
-        num_timesteps = cfg.training.num_refinement_steps + 1
-        min_beta = 0.9**2  # Convert std to variance
-        max_beta = 0.99**2  # Convert std to variance
-        signal_retention = 0.2  # Adjust this value to control how much signal to retain at the end
-
-        # Create an exponentially increasing schedule with a cap
-        betas = [
-            min_beta + (max_beta - min_beta) * (1 - signal_retention) * (1 - np.exp(-5 * t / (num_timesteps - 1)))
-            for t in range(num_timesteps)
-        ]
         betas = [0.94,0.94,0.94,0.94,0.94]
        
-        #betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
-        
-        # # scheduling the addition of noise
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=cfg.training.num_refinement_steps + 1,
             trained_betas=betas,
             prediction_type="v_prediction", # shouldnt this be "epsilon"
             clip_sample=False,
         )
-        # For Diffusion models and models in general working on small errors,
-        # it is better to evaluate the exponential average of the model weights
-        # instead of the current weights. If an appropriate scheduler with
-        # cooldown is used, the test results will be not influenced.
         ema = ExponentialMovingAverage(model, 0.995)
         ema.register()
      
@@ -232,7 +213,19 @@ def run_training(cfg):
                 
 
                 elif cfg.training.type == 'diffusion':
-                    target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size-1:cfg.model.context_size]) 
+                     
+
+                    if cfg.model.mesh == 'healpix':
+                        constants[accum_idx] = einops.rearrange(constants[accum_idx], "b t c f h w -> (b f) t c h w")
+                        prescribed[accum_idx] = einops.rearrange(prescribed[accum_idx], "b t c f h w -> (b f) t c h w")
+                        prognostic[accum_idx] = einops.rearrange(prognostic[accum_idx], "b t c f h w -> (b f) t c h w")
+                        target[accum_idx] = einops.rearrange(target[accum_idx], "b t c f h w -> (b f) t c h w")
+                        print("reshapeed??")
+
+                        
+                    target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size-1:cfg.model.context_size])
+                    print("target res", target_res.shape)
+                    
                     k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
                     k_scalar = k.item()
                     batch_size = prognostic[accum_idx].shape[0]

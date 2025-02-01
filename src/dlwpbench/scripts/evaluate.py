@@ -1057,7 +1057,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/modunet_inverted_32B_COMP_check'], #'outputs/modernunet_inverted', 'outputs/speccheckCHECK2INV0.7 ', 'outputs/modunet_inverted_32B_COMP_check','outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/unet_inverted_C2_hpx', 'outputs/speccheckCHECK2INV0.7', 'outputs/modunet_inverted_32B_COMP_check'], #'outputs/modernunet_inverted', , ,'outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")
