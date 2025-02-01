@@ -34,9 +34,8 @@ def fourier_embedding(timesteps: th.Tensor, dim, max_period=10000):
 # MIT License
 class DiffusionModel(th.nn.Module):
     @abstractmethod
-    def forward(self, constants, prescribed, prognostic, emb):
+    def forward(self, constants, prescribed, prognostic, noise_scheduler, target):
         pass
-        
 
 class ConditionedBlock(th.nn.Module):
     @abstractmethod
@@ -145,11 +144,16 @@ class DiffModernUNet(DiffusionModel):
 
         if prognostic.ndim == 6:
             prognostic = einops.rearrange(prognostic, "b t c f h w -> (b f) t c h w")
-        
-        y_noised = y_noised.expand(-1, prognostic.shape[1], -1, -1, -1) # B, T, C, H, W
+
+        if y_noised.ndim == 5:
+            y_noised = y_noised.expand(-1, prognostic.shape[1], -1, -1, -1) # B, T, C, H, W
+
+        elif y_noised.ndim == 6:
+            y_noised = y_noised.expand(-1, prognostic.shape[1], -1, -1, -1, -1)
+            y_noised = einops.rearrange(y_noised, "b t c f h w -> (b f) t c h w")
 
         prognostic_t = th.cat([prognostic, y_noised], axis=2) # on channel concat right?
-        
+       
         with th.no_grad():
             x_t = self._prepare_inputs(
                     constants=constants,
@@ -170,8 +174,15 @@ class DiffModernUNet(DiffusionModel):
     
     def diffusion_forward(self, constants, prescribed, prognostic, noise_scheduler, target_shape):
         # Apply all diffusion step and return the full output
+        if prognostic.ndim == 6:
+            prognostic = einops.rearrange(prognostic, "b t c f h w -> (b f) t c h w")
 
+        if len(target_shape) ==6:
+            b, t, c, f, h, w = target_shape
+            target_shape = (b * f, t, c, h, w)
+            
         y_noised = th.randn(target_shape).to(device=prognostic[0].device)
+
 
         for k in noise_scheduler.timesteps:
                        
@@ -190,7 +201,7 @@ class DiffModernUNet(DiffusionModel):
             
             
         y = y_noised.to(device=prognostic[0].device)
-        
+
         y = einops.rearrange(y, "b t c h w -> b (t c) h w")
  
         return y
@@ -307,11 +318,6 @@ class DiffMUNetHPX(DiffModernUNet):
                 tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
  
         return th.cat(tensors, dim=1)
-
-    @abstractmethod
-    def forward(self, constants, prescribed, prognostic, emb):
-        pass
-
 
     
 class ModernUNetEncoder(th.nn.Module):
@@ -445,7 +451,6 @@ class ModernUNetDecoder(th.nn.Module):
                 layer.append(self.attn)
                     
                
-
                 
             # Apply upsampling if not in top-most layer
             if c_idx < len(hidden_channels)-1: 
@@ -580,6 +585,7 @@ class ResidualBlock(ConditionedBlock):
         if self.use_scale_shift_norm:
             scale, shift = th.chunk(emb_out, 2, dim=1)
             h = self.norm2(h) * (1 + scale) + shift  # where we do -1 or +1 doesn't matter
+            
             h = self.activation(h)
             h = self.cylinder_pad(h)
             h = self.conv2(h)
