@@ -54,18 +54,42 @@ def run_training(cfg):
 
     optimizer = th.optim.AdamW(params=model.parameters(), lr=cfg.training.learning_rate, weight_decay=cfg.training.optimizer_weight_decay) 
     scheduler = th.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=cfg.training.epochs)
-    
+
+    if cfg.training.type == 'dyfusion':
+        # want early steps to have a smal noise factor and later steps to have a strong noise factor
+        # how to init the betas?
+
+        num_timesteps = cfg.training.num_refinement_steps + 1
+        min_beta = 0.9**2  # Convert std to variance
+        max_beta = 0.99**2  # Convert std to variance
+        signal_retention = 0.2  # Adjust this value to control how much signal to retain at the end
+
+        # Create an exponentially increasing schedule with a cap
+        betas = [
+            min_beta + (max_beta - min_beta) * (1 - signal_retention) * (1 - np.exp(-5 * t / (num_timesteps - 1)))
+            for t in range(num_timesteps)
+        ]
+        betas = [0.94,0.94,0.94,0.94,0.94]
+       
+        #betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
+        
+        # # scheduling the addition of noise
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=cfg.training.num_refinement_steps + 1,
+            trained_betas=betas,
+            prediction_type="v_prediction", # shouldnt this be "epsilon"
+            clip_sample=False,
+        )
+        # For Diffusion models and models in general working on small errors,
+        # it is better to evaluate the exponential average of the model weights
+        # instead of the current weights. If an appropriate scheduler with
+        # cooldown is used, the test results will be not influenced.
+        ema = ExponentialMovingAverage(model, 0.995)
+        ema.register()
+     
+
     
     if cfg.training.type == 'diffusion':
-
-        #We use a DDPM scheduler with squaredcos_cap_v2 scheduling, a beta range of 1e-4 to 1e-1, and 1000 train time steps.
-        # how to do this??
-        # noise_scheduler = DDPMScheduler( 
-        #     num_train_timesteps=cfg.training.num_refinement_steps,
-        #     beta_start= 1e-4,
-        #     beta_end=1e-1,
-        #     beta_schedule="squaredcos_cap_v2") # min_noise_std: 4e-4 
-
 
         betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
         # # scheduling the addition of noise
@@ -86,7 +110,11 @@ def run_training(cfg):
     #exit()
 
     # Initialize training modules
-    criterion = CustomMSELoss() 
+    if cfg.model.mesh == 'healpix':
+        criterion = CustomMSELoss(healpix=True)
+
+    else:
+        criterion = CustomMSELoss() 
 
     # Load checkpoint from file to continue training or initialize training scalars
     checkpoint_path = os.path.join("outputs", cfg.model.name, "checkpoints", f"{cfg.model.name}_last.ckpt")
@@ -166,49 +194,83 @@ def run_training(cfg):
             optimizer.zero_grad()
             for accum_idx in range(len(prognostic)):
                 # mixed precision
-                with th.cuda.amp.autocast(enabled=True):
-            
-                    if cfg.training.type == 'diffusion':
-                        # predicting the residual!
-                        target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size:cfg.model.context_size+1]) * 0.3 #self.hparams.difference_weight
-                        k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
-                        k_scalar = k.item()
-                        batch_size = prognostic[accum_idx].shape[0]
-                        time_tensor = th.full((batch_size,), k_scalar, device=device)
-                        # constructing the noise factor
-                        noise_factor = noise_scheduler.alphas_cumprod.to(device)[k]
-                        noise_factor = noise_factor.view(-1, *[1 for _ in range(prognostic[accum_idx].ndim - 1)])
-                        signal_factor = 1 - noise_factor
+                #with th.cuda.amp.autocast(enabled=True):
+                if cfg.training.type =='dyfusion':
+                
+                    # DYffusion training step - IGNORE: WORK IN PROGRESS
+                    assert cfg.training.num_refinement_steps == cfg.training.sequence_length - cfg.model.context_size
 
-                        #target_new = target[accum_idx] 
-                        noise = th.randn_like(target_res)
-                        y_noised = noise_scheduler.add_noise(target_res, noise, k)
-                        
-                        output = model.single_forward(constants[accum_idx], prescribed[accum_idx][:, 0:cfg.model.context_size], prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised, time = time_tensor)
-                        output = output.unsqueeze(1)
-                        
-                        if isinstance(target, tuple):
-                            target = list(target)
-                        
-                        target[accum_idx] = (noise_factor**0.5) * noise - (signal_factor**0.5) * target_res
-                        target = tuple(target)
-                        
-                        assert output.shape == target[accum_idx].shape
-                      
-                        
-                    else:
+                    k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
+                    k_scalar = k.item()
+                    batch_size = prognostic[accum_idx].shape[0]
+                    # difference between step and target
+                    target_res = (target[accum_idx][:,-1].unsqueeze(1) - prognostic[accum_idx][:, cfg.model.context_size-1+k:cfg.model.context_size+k])
+                    print(target[accum_idx][:,-1].shape)
+                    print(prognostic[accum_idx][:, cfg.model.context_size-1+k:cfg.model.context_size+k].shape)
+                    print(target_res.shape)
 
-                        output = model(
-                            constants=constants[accum_idx] if not constants == None else None,
-                            prescribed=prescribed[accum_idx] if not prescribed == None else None,
-                            prognostic=prognostic[accum_idx]
-                        )
+                    time_tensor = th.full((batch_size,), k_scalar, device=device)
+
+                    noise_factor = noise_scheduler.alphas_cumprod.to(device)[k]
+                    noise_factor = noise_factor.view(-1, *[1 for _ in range(prognostic[accum_idx].ndim - 1)])
+                    signal_factor = 1 - noise_factor
+                    
+                    y_noised = target_res 
+
+                    # given the input and noised target
+                    output = model.single_forward(constants[accum_idx], prescribed[accum_idx][:, 0:cfg.model.context_size], prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised, time = time_tensor)
+                    output = output.unsqueeze(1)
+
+                    if isinstance(target, tuple):
+                        target = list(target)
+                    
+                    target[accum_idx] =  target_res 
+                    target = tuple(target)
+                    
+                    assert output.shape == target[accum_idx].shape
+                    
+                
+
+                elif cfg.training.type == 'diffusion':
+                    target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size-1:cfg.model.context_size]) 
+                    k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
+                    k_scalar = k.item()
+                    batch_size = prognostic[accum_idx].shape[0]
+                    time_tensor = th.full((batch_size,), k_scalar, device=device)
+                    # constructing the noise factor
+                    noise_factor = noise_scheduler.alphas_cumprod.to(device)[k]
+                    noise_factor = noise_factor.view(-1, *[1 for _ in range(prognostic[accum_idx].ndim - 1)])
+                    signal_factor = 1 - noise_factor
+
+                    #target_new = target[accum_idx] 
+                    noise = th.randn_like(target_res)
+                    y_noised = noise_scheduler.add_noise(target_res, noise, k)
+                    
+                    output = model.single_forward(constants[accum_idx], prescribed[accum_idx][:, 0:cfg.model.context_size], prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised, time = time_tensor)
+                    output = output.unsqueeze(1)
+                    
+                    if isinstance(target, tuple):
+                        target = list(target)
+                    
+                    target[accum_idx] = (noise_factor**0.5) * noise - (signal_factor**0.5) * target_res
+                    target = tuple(target)
+                    
+                    assert output.shape == target[accum_idx].shape
+                    
+                    
+                else:
+
+                    output = model(
+                        constants=constants[accum_idx] if not constants == None else None,
+                        prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                        prognostic=prognostic[accum_idx]
+                    )
 
                 
                 train_loss = criterion(output, target[accum_idx])
                 train_loss.backward()
 
-                if cfg.training.type == 'diffusion':
+                if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
                     wandb.log({f"MSE/{k_scalar}_training": train_loss}, step=iteration)
                     
 
@@ -224,7 +286,7 @@ def run_training(cfg):
                 
             optimizer.step()
 
-            if cfg.training.type == 'diffusion':
+            if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
                 ema.update()
 
             wandb.log({"MSE/training": train_loss}, step=iteration)
@@ -244,7 +306,7 @@ def run_training(cfg):
             
         print('do we get here?')
 
-        if cfg.training.type == 'diffusion': 
+        if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
             ema.apply_shadow()
 
         # Validate (without gradients)
@@ -258,19 +320,36 @@ def run_training(cfg):
                 prescribed = prescribed.to(device=device).split(split_size) if not prescribed.isnan().any() else None
                 prognostic = prognostic.to(device=device).split(split_size)
                 target = target.to(device=device).split(split_size)
-                print("target shape", target)
-                print(target)
+                
                 for accum_idx in range(len(prognostic)):
 
-                    if cfg.training.type == 'diffusion':
+                    if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
+                        noise_scheduler.set_timesteps(cfg.model.num_refinement_step)
                         # implement all diffusion steps
                         print("Validating Diffusion Model")
-                        noise_scheduler.set_timesteps(cfg.model.num_refinement_step)
-                        output = model(
-                        constants=constants[accum_idx] if not constants == None else None,
-                        prescribed=prescribed[accum_idx] if not prescribed == None else None,
-                        prognostic=prognostic[accum_idx],
-                        noise_scheduler = noise_scheduler, target = target[accum_idx])
+                        outputs_ensemble = []
+
+                        for _ in range(5):
+
+                            output = model(
+                            constants=constants[accum_idx] if not constants == None else None,
+                            prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                            prognostic=prognostic[accum_idx],
+                            noise_scheduler = noise_scheduler, target = target[accum_idx])
+                            outputs_ensemble.append(output)
+
+                        # Calculate the mean of the 3 predictions
+                        stacked_outputs = th.stack(outputs_ensemble, dim=0) 
+                        ensemble_mean = stacked_outputs.mean(dim=0) #[B, T, C, W, H]
+                        output = ensemble_mean  # Use the ensemble mean as the final output
+                        
+                        # Log std
+                        ensemble_std = stacked_outputs.std(dim=0)
+                        daily_std = ensemble_std.mean(dim=(0, 2, 3, 4))
+                        
+                        wandb.log({
+                            f"ensemble_std_day_{i}": std.item() for i, std in enumerate(daily_std)
+                        })
 
 
                     else:
@@ -292,11 +371,14 @@ def run_training(cfg):
 
             criterion_wo_reduction = th.nn.MSELoss(reduction='none')
 
-            # MSE LOSS PER TIMESTEP - VALIDATION - [B, T, C, W, H]
-            mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()    
+            # MSE LOSS PER TIMESTEP - VALIDATION 
+            if cfg.model.mesh == 'healpix': # [B, T, C, (F), H, W]
+                mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4, 5)).cpu().numpy()
+            else: # [B, T, C, W, H]
+                mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()   
             
             log_dict = {
-                f"MSE_validation/time_{i}": value 
+                f"MSE_validation/time_{i}": float(value)
                 for i, value in enumerate(mean_loss_per_time_step)
             }
            
@@ -304,13 +386,10 @@ def run_training(cfg):
             wandb.log(log_dict, step=iteration)
 
             # Compute the mean loss over the first time step
-            if epoch % 10 == 0:
+            if epoch % 10 == 0 and cfg.model.mesh != 'healpix':
 
                 plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
-                # plot final target predictions
-                #plot_output_vs_target(outputs_cat, targets_cat, variable_list, epoch)
-
-                
+               
             for channel in range(outputs_cat.shape[2]):  
                 # Log the loss per channel over the entire rollout
 
@@ -326,7 +405,7 @@ def run_training(cfg):
             epoch_val_loss = criterion(outputs_cat, targets_cat).numpy()
 
         wandb.log({"MSE/validation": epoch_val_loss}, step=iteration)
-        if cfg.training.type == 'diffusion': 
+        if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
             ema.restore()
        
         # Write model checkpoint to file, using a separate thread
@@ -351,8 +430,8 @@ def run_training(cfg):
                 "iteration": iteration
             }, step=iteration)
 
-            if cfg.training.type == 'diffusion': 
-                wandb.log({'ema_state_dict': ema.shadow}, step=iteration)
+            #if cfg.training.type == 'diffusion': 
+            #    wandb.log({'ema_state_dict': ema.shadow}, step=iteration)
             
         # Print training progress to console
         if cfg.verbose:
