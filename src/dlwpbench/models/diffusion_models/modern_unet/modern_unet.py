@@ -1,7 +1,7 @@
 import torch as th
 import einops
 from utils import CylinderPad
-from utils import HEALPixLayer
+from utils import HEALPixPadding,ConditionalHEALPixLayer
 from abc import ABC, abstractmethod
 import math 
 
@@ -81,6 +81,7 @@ class DiffModernUNet(DiffusionModel):
         self.activation = activation
         self.predict_diff = predict_diff
         self.num_refinement_step = num_refinement_step
+        
 
         self.time_embed = th.nn.Sequential(
             th.nn.Linear(self.hidden_channels[0], time_embed_dim),
@@ -106,8 +107,8 @@ class DiffModernUNet(DiffusionModel):
             time_embed_dim = time_embed_dim,
             norm = norm,
             activation=activation,
-            use_scale_shift_norm=use_scale_shift_norm
-            #mesh = mesh
+            use_scale_shift_norm=use_scale_shift_norm,
+            mesh = mesh
             )
       
 
@@ -141,11 +142,14 @@ class DiffModernUNet(DiffusionModel):
         time_multiplier = 1000 / self.num_refinement_step 
         # multiply before passing to the fourier embeddings
         time = time*time_multiplier
+
+        if prognostic.ndim == 6:
+            prognostic = einops.rearrange(prognostic, "b t c f h w -> (b f) t c h w")
         
-        y_noised = y_noised.expand(-1, prognostic.shape[1], -1, -1, -1) 
+        y_noised = y_noised.expand(-1, prognostic.shape[1], -1, -1, -1) # B, T, C, H, W
 
         prognostic_t = th.cat([prognostic, y_noised], axis=2) # on channel concat right?
-
+        
         with th.no_grad():
             x_t = self._prepare_inputs(
                     constants=constants,
@@ -157,11 +161,11 @@ class DiffModernUNet(DiffusionModel):
         time_emb = self.time_embed(fourier)
 
         enc = self.encoder(x_t, emb = time_emb) 
-    
+      
         enc2 = self.middle(enc[-1], emb=time_emb)
         
         out = self.decoder(x=enc2, skips=enc[::-1], emb=time_emb) 
-
+    
         return out
     
     def diffusion_forward(self, constants, prescribed, prognostic, noise_scheduler, target_shape):
@@ -238,18 +242,77 @@ class DiffModernUNet(DiffusionModel):
                 
                 prescribed = prescribed_input[:, t-self.context_size:t] if prescribed_input is not None else None
                 
-            # Implement an entire forward step including all diffusion intermediates
             target = prognostic[:, t].unsqueeze(1)
-
+            
             out = self.diffusion_forward(constants, prescribed, prognostic_t, noise_scheduler, target.shape)
 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
 
-            out = prognostic_t[:, -1] + out  # since we are training to predict the residual!!
+            out = prognostic_t[:, -1] + out # since we are training to predict the residual!!
                  
             outs.append(out)
 
         return th.stack(outs, dim=1) # What is the stacking dimension here?
+
+class DiffMUNetHPX(DiffModernUNet):
+
+    def __init__(self,
+        constant_channels: int = 4,
+        prescribed_channels: int = 0,
+        prognostic_channels: int = 1,
+        hidden_channels: list = [64, 128, 256, 1024],
+        activation: th.nn.Module = th.nn.GELU(),
+        context_size: int = 1,
+        mesh: str = "healpix",
+        attention: bool = False,
+        norm: bool = False, # groupnorm in each residual block?
+        use_scale_shift_norm=True,
+        predict_diff = True,
+        num_refinement_step = 5,
+        **kwargs
+    ):
+        super(DiffMUNetHPX, self).__init__(
+            constant_channels=constant_channels,
+            prescribed_channels=prescribed_channels,
+            prognostic_channels=prognostic_channels,
+            hidden_channels=hidden_channels,
+            activation=activation,
+            context_size=context_size,
+            mesh="healpix",
+            attention = attention,
+            norm=norm,
+            use_scale_shift_norm=use_scale_shift_norm,
+            predict_diff = predict_diff,
+            num_refinement_step = num_refinement_step,
+            kwargs=kwargs
+        )
+    
+    def _prepare_inputs(
+        self,
+        constants: th.Tensor = None,
+        prescribed: th.Tensor = None,
+        prognostic: th.Tensor = None
+    ) -> th.Tensor:
+        """
+        return: Tensor of shape [(B*F), (T*C), H, W] containing constants, prescribed, and prognostic/output variables
+        """
+        tensors = []
+        if constants is not None: tensors.append(einops.rearrange(constants[:, 0], "b c f h w -> (b f) c h w"))
+        if prescribed is not None: tensors.append(einops.rearrange(prescribed, "b t c f h w -> (b f) (t c) h w"))
+        if prognostic is not None:
+            
+            if prognostic.ndim == 6:
+                tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w"))
+            elif prognostic.ndim == 5:
+                tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
+ 
+        return th.cat(tensors, dim=1)
+
+    @abstractmethod
+    def forward(self, constants, prescribed, prognostic, emb):
+        pass
+
+
     
 class ModernUNetEncoder(th.nn.Module):
     """Unet encoder as used in the pde-refiner paper.
@@ -294,15 +357,21 @@ class ModernUNetEncoder(th.nn.Module):
                   
                 # (4) Attention
                 layer.append(self.attn)
+
+            elif mesh == "healpix":
+                layer.append(ConditionalHEALPixLayer(
+                    layer=ResidualBlock,
+                    in_channels=c_in,
+                    out_channels=c_out,
+                    cond_channels=time_embed_dim,
+                    kernel_size= 3,
+                    padding = 1,
+                    mesh=mesh
+                    ))
+                
+                layer.append(self.attn)
                     
                              
-                # elif mesh == "healpix":
-                #     layer.append(HEALPixLayer(
-                #         layer=ResidualBlock,
-                #         in_channels=c_in if n_conv == 0 else c_out,
-                #         out_channels=c_out))
-                #     layer.append(self.attn)
-                
               
             self.layers.append(th.nn.Sequential(*layer))
 
@@ -315,8 +384,14 @@ class ModernUNetEncoder(th.nn.Module):
             for module in layer:
                 if isinstance(module, ConditionedBlock):
                     x = module(x, emb)
+                elif isinstance(module, ConditionalHEALPixLayer): # REMOVE
+                    x = module(x, emb)
                 else:
-                    x = module(x)
+                    try:
+                        x = module(x)
+                    except:
+                        x = module(x, emb)
+
                     
             outs.append(x)
         return outs
@@ -356,15 +431,20 @@ class ModernUNetDecoder(th.nn.Module):
                     padding = 1,
                     use_scale_shift_norm=use_scale_shift_norm))
                 layer.append(self.attn)
+
+            elif mesh == "healpix":
+                layer.append(ConditionalHEALPixLayer(
+                    layer=ResidualBlock,
+                    in_channels=c_in_,
+                    out_channels=c_out,
+                    cond_channels=time_embed_dim,
+                    kernel_size=3,
+                    padding=1,
+                    mesh = mesh
+                ))
+                layer.append(self.attn)
                     
-                # elif mesh == "healpix":
-                #     layer.append(HEALPixLayer(
-                #         layer=th.nn.Conv2d,
-                #         in_channels=c_in_ if n_conv == 0 else c_out,
-                #         out_channels=c_out,
-                #         kernel_size=3,
-                #         padding=1
-                #     ))
+               
 
                 
             # Apply upsampling if not in top-most layer
@@ -389,7 +469,7 @@ class ModernUNetDecoder(th.nn.Module):
             kernel_size=1 
         ))
 
-        self.final_norm = th.nn.GroupNorm(8, c_out)
+        self.final_norm = th.nn.GroupNorm(4, c_out)
 
     def forward(self, x: th.Tensor, skips: list, emb: th.Tensor) -> th.Tensor:
         for l_idx, layer in enumerate(self.layers):
@@ -397,8 +477,13 @@ class ModernUNetDecoder(th.nn.Module):
             for module in layer:
                 if isinstance(module, ConditionedBlock):
                     x = module(x, emb)
+                elif isinstance(module, ConditionalHEALPixLayer): 
+                    x = module(x, emb)
                 else:
-                    x = module(x)
+                    try:
+                        x = module(x)
+                    except:
+                        x = module(x, emb)
 
         return self.output_layer(self.activation(self.final_norm(x)))
     
@@ -441,19 +526,27 @@ class ResidualBlock(ConditionedBlock):
         cond_channels: int,
         activation =  th.nn.GELU(),
         norm: bool = False,
-        n_groups: int = 8,
+        n_groups: int = 4, #8
         use_scale_shift_norm: bool = True,
         kernel_size = 3,
-        padding = 1
+        padding = 1,
+        mesh=None
         
     ):
         super().__init__()
        
         self.activation = activation
         self.use_scale_shift_norm = use_scale_shift_norm
-        
+        self.mesh=mesh
+
         # padding already provided 
-        self.cylinder_pad = CylinderPad(padding=padding)
+        if self.mesh == 'healpix':
+            padding = ((kernel_size - 1)//2) #*dilation
+            self.cylinder_pad = HEALPixPadding(padding=padding)
+
+        else:
+            self.cylinder_pad = CylinderPad(padding=padding)
+               
         self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=0) 
         self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=0)) 
         # If the number of input channels is not equal to the number of output channels we have to
@@ -522,7 +615,8 @@ class MiddleBlock(ConditionedBlock):
         attention: bool = False,
         activation = th.nn.GELU(),
         norm: bool = False,
-        use_scale_shift_norm: bool = True
+        use_scale_shift_norm: bool = True,
+        mesh=None
          
     ):
         super().__init__()
@@ -532,7 +626,8 @@ class MiddleBlock(ConditionedBlock):
             cond_channels=time_embed_dim,
             activation=activation,
             norm = norm,
-            use_scale_shift_norm=use_scale_shift_norm)
+            use_scale_shift_norm=use_scale_shift_norm,
+            mesh=mesh)
         
         self.attn = th.nn.Identity() # AttentionBlock(in_channels) if attention else th.nn.Identity()
 
@@ -542,7 +637,8 @@ class MiddleBlock(ConditionedBlock):
             cond_channels= time_embed_dim,
             activation=activation,
             norm = norm,
-            use_scale_shift_norm=use_scale_shift_norm)
+            use_scale_shift_norm=use_scale_shift_norm,
+            mesh=mesh)
 
     def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
         x = self.res1(x, emb)

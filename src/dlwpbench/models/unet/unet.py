@@ -4,9 +4,10 @@
 import torch as th
 import einops
 from utils import CylinderPad
-from utils import HEALPixLayer
+from utils import HEALPixLayer,HEALPixPadding
 
 # File contains both a standard unet and modern unet with wide residual blocks
+
 
 class ModernUNet(th.nn.Module):
     """
@@ -47,8 +48,8 @@ class ModernUNet(th.nn.Module):
             in_channels=hidden_channels[-1], 
             #attention = attention,
             norm = norm,
-            activation=activation
-            #mesh = mesh
+            activation=activation,
+            mesh=mesh
             )
       
 
@@ -120,8 +121,8 @@ class ModernUNet(th.nn.Module):
             enc2 = self.middle(enc[-1])
 
             out = self.decoder(x=enc2, skips=enc[::-1]) 
+
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
-            
             
             out = prognostic_t[:, -1] + out
 
@@ -131,6 +132,49 @@ class ModernUNet(th.nn.Module):
 
        
         return th.stack(outs, dim=1)
+    
+class MUNetHPX(ModernUNet):
+
+    def __init__(self,
+        constant_channels: int = 4,
+        prescribed_channels: int = 0,
+        prognostic_channels: int = 1,
+        hidden_channels: list = [64, 128, 256, 1024],
+        activation: th.nn.Module = th.nn.GELU(),
+        context_size: int = 1,
+        mesh: str = "healpix",
+        attention: bool = False,
+        norm: bool = False, # groupnorm in each residual block?
+        **kwargs
+    ):
+        super(MUNetHPX, self).__init__(
+            constant_channels=constant_channels,
+            prescribed_channels=prescribed_channels,
+            prognostic_channels=prognostic_channels,
+            hidden_channels=hidden_channels,
+            activation=activation,
+            context_size=context_size,
+            mesh="healpix",
+            attention = attention,
+            norm=norm,
+            kwargs=kwargs
+        )
+    
+    def _prepare_inputs(
+        self,
+        constants: th.Tensor = None,
+        prescribed: th.Tensor = None,
+        prognostic: th.Tensor = None
+    ) -> th.Tensor:
+        """
+        return: Tensor of shape [(B*F), (T*C), H, W] containing constants, prescribed, and prognostic/output variables
+        """
+        tensors = []
+        if constants is not None: tensors.append(einops.rearrange(constants[:, 0], "b c f h w -> (b f) c h w"))
+        if prescribed is not None: tensors.append(einops.rearrange(prescribed, "b t c f h w -> (b f) (t c) h w"))
+        if prognostic is not None: tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w"))
+        return th.cat(tensors, dim=1)
+
 
 
 class UNet(th.nn.Module):
@@ -457,16 +501,20 @@ class ModernUNetEncoder(th.nn.Module):
                   
                 # (4) Attention
                 layer.append(self.attn)
+
+            elif mesh == "healpix":
+                layer.append(HEALPixLayer(
+                    layer=ResidualBlock,
+                    in_channels=c_in,
+                    out_channels=c_out,
+                    kernel_size= 3,
+                    padding = 1,
+                    mesh=mesh
+                    ))
+                
+                layer.append(self.attn)
                     
                              
-                # elif mesh == "healpix":
-                #     layer.append(HEALPixLayer(
-                #         layer=ResidualBlock,
-                #         in_channels=c_in if n_conv == 0 else c_out,
-                #         out_channels=c_out))
-                #     layer.append(self.attn)
-                
-              
             self.layers.append(th.nn.Sequential(*layer))
 
         self.layers = th.nn.ModuleList(self.layers)
@@ -511,14 +559,16 @@ class ModernUNetDecoder(th.nn.Module):
                     padding = 1))
                 layer.append(self.attn)
                     
-                # elif mesh == "healpix":
-                #     layer.append(HEALPixLayer(
-                #         layer=th.nn.Conv2d,
-                #         in_channels=c_in_ if n_conv == 0 else c_out,
-                #         out_channels=c_out,
-                #         kernel_size=3,
-                #         padding=1
-                #     ))
+            elif mesh == "healpix":
+                layer.append(HEALPixLayer(
+                    layer=ResidualBlock,
+                    in_channels=c_in_,
+                    out_channels=c_out,
+                    kernel_size=3,
+                    padding=1,
+                    mesh = mesh
+                ))
+                layer.append(self.attn)
 
                 
             # Apply upsampling if not in top-most layer
@@ -591,16 +641,23 @@ class ResidualBlock(th.nn.Module):
         norm: bool = False,
         n_groups: int = 8,
         kernel_size = 3,
-        padding = 1
+        padding = 1,
+        mesh = None
         
     ):
         super().__init__()
        
         self.activation = activation
+        self.mesh = mesh
         
 
         # padding already provided 
-        self.cylinder_pad = CylinderPad(padding=padding)
+        if self.mesh == 'healpix':
+            padding = ((kernel_size - 1)//2) #*dilation
+            self.cylinder_pad = HEALPixPadding(padding=padding)
+
+        else:
+            self.cylinder_pad = CylinderPad(padding=padding)
         self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=0) 
         self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=0)) 
         # If the number of input channels is not equal to the number of output channels we have to
@@ -652,6 +709,7 @@ class MiddleBlock(th.nn.Module):
         attention: bool = False,
         activation = th.nn.GELU(),
         norm: bool = False,
+        mesh = None
          
     ):
         super().__init__()
@@ -659,7 +717,8 @@ class MiddleBlock(th.nn.Module):
             in_channels,
             in_channels,
             activation=activation,
-            norm = norm)
+            norm = norm,
+            mesh = mesh)
         
         self.attn = th.nn.Identity() # AttentionBlock(in_channels) if attention else th.nn.Identity()
 
@@ -667,7 +726,8 @@ class MiddleBlock(th.nn.Module):
             in_channels,
             in_channels,
             activation=activation,
-            norm = norm)
+            norm =norm,
+            mesh =mesh)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         x = self.res1(x)
