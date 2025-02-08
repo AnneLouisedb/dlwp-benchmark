@@ -1,0 +1,88 @@
+activate dlwpbench environment
+/home/adboer/.conda/envs/dlwp-hpx/lib/python3.12/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+wandb: Using wandb-core as the SDK backend.  Please refer to https://wandb.me/wandb-core for more information.
+wandb: Currently logged in as: annelouisedeboer99 (annelouisedeboer99-university-of-amsterdam). Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.19.0
+wandb: Run data is saved locally in /gpfs/home6/adboer/dlwp-benchmark/src/dlwpbench/wandb/run-20250208_140435-ql1zmr1a
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run crimson-eon-704
+wandb: ⭐️ View project at https://wandb.ai/annelouisedeboer99-university-of-amsterdam/dlwp-benchmark_scalingup
+wandb: 🚀 View run at https://wandb.ai/annelouisedeboer99-university-of-amsterdam/dlwp-benchmark_scalingup/runs/ql1zmr1a
+
+Initializing model
+in channels expected? 11
+	Model checking_attention has 29604099 trainable parameters
+
+/home/adboer/.conda/envs/dlwp-hpx/lib/python3.12/site-packages/xarray/backends/api.py:651: RuntimeWarning: 'netcdf4' fails while guessing
+  engine = plugins.guess_engine(filename_or_obj)
+/home/adboer/.conda/envs/dlwp-hpx/lib/python3.12/site-packages/xarray/backends/api.py:651: RuntimeWarning: 'h5netcdf' fails while guessing
+  engine = plugins.guess_engine(filename_or_obj)
+/home/adboer/.conda/envs/dlwp-hpx/lib/python3.12/site-packages/xarray/backends/api.py:651: RuntimeWarning: 'scipy' fails while guessing
+  engine = plugins.guess_engine(filename_or_obj)
+
+Initializing datasets
+DATA {'_target_': 'data.datasets.WeatherBenchDataset', 'type': 'WeatherBenchDataset', 'data_path': 'data/zarr/weatherbench_hpx8/', 'engine': 'zarr', 'train_start_date': '1979-01-02', 'train_stop_date': '2014-12-31', 'val_start_date': '2015-01-01', 'val_stop_date': '2016-12-31', 'test_start_date': '2017-01-01', 'test_stop_date': '2018-12-31', 'timedelta': 1, 'init_dates': None, 'normalize': True, 'num_workers': 2, 'drop_last': True, 'height': 32, 'width': 64, 'sequence_length': 'None', 'downscale_factor': 1, 'context_size': '${model.context_size}', 'constant_names': ['orography', 'lsm', 'lat2d', 'lon2d'], 'prescribed_variable_names': ['tisr'], 'prognostic_variable_names_and_levels': {'msl': [], 'stream250': [], 'stream500': []}}
+	Loading dataset from 1979-01-02 to 2014-12-31 into RAM... took 27.58546781539917 seconds
+context size 1
+statistics on dataset
+orography
+lsm
+lat2d
+lon2d
+tisr
+"mean": 1225727.75,
+"std": 1575133.5
+msl
+"mean": 101139.71529166454,
+"std": 1067.9662036351751
+
+stream250
+"mean": -20385.71390572758,
+"std": 66426910.22763947
+
+stream500
+"mean": -13129.501007255905,
+"std": 30889027.09672476
+
+None
+	Loading dataset from 2015-01-01 to 2016-12-31 into RAM... took 4.382333040237427 seconds
+context size 1
+statistics on dataset
+orography
+lsm
+lat2d
+lon2d
+tisr
+"mean": 1226038.5,
+"std": 1575533.375
+msl
+"mean": 101142.02557048807,
+"std": 1108.820219590361
+
+stream250
+"mean": -20753.21485059297,
+"std": 67339341.51543944
+
+stream500
+"mean": -14971.208984772436,
+"std": 31588170.20522518
+
+None
+
+Start training.
+length of dataloader 206
+do we get here?
+Validating Diffusion Model
+tensor([[[[[ 9.9257e-01, -6.3940e-02, -2.7518e-01,  ...,  4.5459e-01,
+             6.3295e-02,  2.5711e-01],
+           [-1.3272e-01,  5.1194e-01, -1.5276e-01,  ..., -3.0786e-02,
+             1.9187e-01, -5.3951e-01],
+           [ 6.1078e-02,  2.8622e-01,  2.1376e-01,  ...,  5.0281e-02,
+             3.6487e-01,  3.8103e-01],
+           ...,
+           [ 4.4584e-01,  3.3692e-01, -2.3973e-02,  ...,  7.6588e-02,
+            -3.1203e-01, -2.8953e-02],
+           [ 4.3092e-01, -3.0306e-01, -1.9323e-01,  ...,  2.4245e-01,
+            -3.7494e-02, -4.0924e-01],
+Exception in thread Thread-3 (write_checkpoint):

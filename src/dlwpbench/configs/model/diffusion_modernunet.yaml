@@ -9,6 +9,7 @@ context_size: 2
 norm: true 
 use_scale_shift_norm: true 
 num_refinement_step: 5
+mesh: "equirectangular"
         
 
 

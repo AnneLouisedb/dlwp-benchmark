@@ -164,7 +164,7 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             cfg.data,
             start_date=cfg.data.test_start_date,
             stop_date=cfg.data.test_stop_date,
-            sequence_length=cfg.testing.sequence_length,
+            sequence_length= cfg.testing.sequence_length,
             init_dates=init_dates
         )
         
@@ -220,6 +220,7 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             target = target.to(device=device)
 
             if cfg.training.type == 'diffusion' or cfg.training.type == 'dyfusion':
+                print("GOT HERE")
                 output = model(
                     constants=constants if not constants == None else None,
                     prescribed=prescribed if not prescribed == None else None,
@@ -227,6 +228,7 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
                     noise_scheduler = noise_scheduler,
                     target = target)
             else:
+                print("normal model?")
 
                 output = model(
                     constants=constants if not constants == None else None,
@@ -977,7 +979,7 @@ def run_evaluations(
     performance_dict = {}
     dataset_hpx = None
     dataset_cyl = None
-    overide = True
+    #overide = True
     wandb.init(project="Evaluation_dlwpbenchmark", name=f"evaluation_all_models") # replace with model name
 
     
@@ -1057,7 +1059,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/DiffMUNetHPX_smallest_98R'], # 'DiffMUNetHPX_test', 'outputs/unet_inverted_C2_hpx'], #'outputs/speccheckCHECK2INV0.7', 'outputs/modernunet_inverted'],#  ], # #, , 'outputs/modunet_inverted_32B_COMP_check'], #, , ,'outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/DMUS_0.2noise', 'outputs/DMUS_0.2noise_againC1', 'outputs/DMUS_0.2noise_againC1150'],# 'outputs/LongContext',  'outputs/MUunet_inverted_C2_hpx88','outputs/DiffMUNetHPX_smallest_98R', 'outputs/DiffMUNetHPX_test', 'outputs/unet_inverted_C2_hpx'], #'outputs/speccheckCHECK2INV0.7', 'outputs/modernunet_inverted'],#  ], # #, , 'outputs/modunet_inverted_32B_COMP_check'], #, , ,'outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")

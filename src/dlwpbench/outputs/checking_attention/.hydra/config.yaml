@@ -1,0 +1,78 @@
+device: cuda:0
+verbose: true
+seed: 1234
+training:
+  epochs: 2
+  type: diffusion
+  learning_rate: 0.0001
+  clip_gradients: true
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  noise: 0.0
+  sequence_length: 2
+  save_model: true
+  continue_training: false
+  dataset_name: ${data.training_set_name}
+  num_refinement_steps: 100
+  min_noise_std: 0.1
+  predict_difference: true
+  optimizer_weight_decay: 1.0e-05
+validation:
+  batch_size: 15
+  gradient_accumulation_steps: 1
+  noise: 0.0
+  sequence_length: 3
+  dataset_name: ${data.validation_set_name}
+testing:
+  batch_size: 32
+  noise: 0.0
+  sequence_length: 17
+  dataset_name: ${data.test_set_name}
+data:
+  _target_: data.datasets.WeatherBenchDataset
+  type: WeatherBenchDataset
+  data_path: data/zarr/weatherbench_hpx8/
+  engine: zarr
+  train_start_date: '1979-01-02'
+  train_stop_date: '2014-12-31'
+  val_start_date: '2015-01-01'
+  val_stop_date: '2016-12-31'
+  test_start_date: '2017-01-01'
+  test_stop_date: '2018-12-31'
+  timedelta: 1
+  init_dates: null
+  normalize: true
+  num_workers: 2
+  drop_last: true
+  height: 32
+  width: 64
+  sequence_length: None
+  downscale_factor: 1
+  context_size: ${model.context_size}
+  constant_names:
+  - orography
+  - lsm
+  - lat2d
+  - lon2d
+  prescribed_variable_names:
+  - tisr
+  prognostic_variable_names_and_levels:
+    msl: []
+    stream250: []
+    stream500: []
+model:
+  type: DiffMUNetHPX
+  name: checking_attention
+  constant_channels: 4
+  prescribed_channels: 1
+  prognostic_channels: 3
+  hidden_channels:
+  - 256
+  - 512
+  activation: th.nn.GELU()
+  context_size: 1
+  norm: true
+  use_scale_shift_norm: true
+  num_refinement_step: 5
+  mesh: healpix
+  attention: false

@@ -2,7 +2,7 @@ _target_: data.datasets.WeatherBenchDataset
 type: WeatherBenchDataset
 data_path: data/zarr/weatherbench_hpx8/
 engine: zarr
-train_start_date: 1979-01-02 # 2014-10-01 
+train_start_date: 1979-01-02 
 train_stop_date: 2014-12-31
 val_start_date: 2015-01-01 #2016-10-01
 val_stop_date: 2016-12-31

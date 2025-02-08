@@ -1,0 +1,15 @@
+- model=diffusion_modernunet_small_inv
+- model.type=DiffMUNetHPX
+- model.name=checking_attention
+- model.mesh=healpix
+- data=initial_variables_hpx8
+- training=diffusion
+- model.context_size=1
+- training.sequence_length=2
+- validation.sequence_length=3
+- model.hidden_channels=[256,512]
+- model.num_refinement_step=5
+- training.min_noise_std=0.1
+- training.num_refinement_steps=100
+- training.epochs=2
+- device=cuda:0

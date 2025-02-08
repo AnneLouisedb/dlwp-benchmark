@@ -5,7 +5,7 @@ img_width: ${data.width}
 patch_size: [1, 1]
 constant_channels: 4
 prescribed_channels: 1
-prognostic_channels: 8
+prognostic_channels: 3 
 embed_dim: 64
 filter: AFNO2D
 depth: 4

@@ -1,12 +1,10 @@
 type: ModernUNet
-name: modern_unet_pde
+name: SmallUnet
 constant_channels: 4
 prescribed_channels: 1
 prognostic_channels: 3  
-hidden_channels: [64, 128, 256, 1024] 
+hidden_channels: [8, 16, 32, 64] 
 activation: th.nn.GELU()  
-context_size: 2
+context_size: 1
 norm: true
-
-
 

@@ -259,7 +259,11 @@ class DiffModernUNet(DiffusionModel):
 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
 
+            print(out)
+
             out = prognostic_t[:, -1] + out # since we are training to predict the residual!!
+
+            print("OUT", out.shape)
                  
             outs.append(out)
 
@@ -336,14 +340,19 @@ class ModernUNetEncoder(th.nn.Module):
     ):
         super(ModernUNetEncoder, self).__init__()
         self.layers = []
-        self.attn = th.nn.Identity() # attention is not yet implemented
 
+        
         channels = [in_channels] + hidden_channels
 
         for c_idx in range(len(channels[:-1])):
             layer = []
             c_in = channels[c_idx]
             c_out = channels[c_idx+1]
+
+            if attention:
+                self.attn = AttentionBlock(c_out)
+            else:
+                self.attn = th.nn.Identity()
 
             # Apply downsampling prior to convolutions if not in top-most layer
             
@@ -417,14 +426,18 @@ class ModernUNetDecoder(th.nn.Module):
         super(ModernUNetDecoder, self).__init__()
         self.layers = []
         hidden_channels = hidden_channels[::-1]  # Invert as we go up in decoder, i.e., from bottom to top layers
-        self.attn = th.nn.Identity() # attention is not yet implemented
-        self.activation = activation
         
+        self.activation = activation
 
         for c_idx in range(len(hidden_channels)):
             layer = []
             c_in = hidden_channels[c_idx]
             c_out = hidden_channels[c_idx]
+
+            if attention:
+                self.attn = AttentionBlock(c_out)
+            else:
+                self.attn = th.nn.Identity()
 
             
             c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
@@ -502,13 +515,75 @@ def zero_module(module):
         p.detach().zero_()
     return module
 
-class AttentionBlockl(th.nn.Module):
+
+class AttentionBlock(th.nn.Module):
+    """This is similar to [transformer multi-head
+    attention](https://arxiv.org/abs/1706.03762).
+
+    Args:
+        n_channels: the number of channels in the input
+        n_heads:  the number of heads in multi-head attention
+        d_k: the number of dimensions in each head
+        n_groups: the number of groups for [group normalization][torch.nn.GroupNorm]
+
+    """
+
     def __init__(
         self,
-        in_channels: int):
+        in_channels: int,
+        n_heads: int = 4,
+        d_k: int = None,
+        ):
         super().__init__()
-   
-        pass
+
+        self.in_channels = in_channels
+        self.n_heads = n_heads
+        self.d_k = d_k if d_k is not None else in_channels 
+      
+        # Projections for query, key, and values
+        self.projection = th.nn.Linear(in_channels, n_heads * self.d_k * 3)
+        # Linear layer for final transformation
+        self.output = th.nn.Linear(n_heads * self.d_k, in_channels)
+
+        self.scale = self.d_k**-0.5  # Scale for dot-product attention
+
+    def forward(self, x: th.Tensor):
+        # Get shape
+        batch_size, n_channels, height, width = x.shape
+
+        # Change `x` to shape `[batch_size, seq, n_channels]`
+        x = x.view(batch_size, n_channels, -1).permute(0, 2, 1) #seq x channel
+
+        # Get query, key, and values (concatenated) and shape it to `[batch_size, seq, n_heads, 3 * d_k]`
+        qkv = self.projection(x).view(batch_size, -1, self.n_heads, 3 * self.d_k)
+
+        # Split query, key, and values. Each of them will have shape `[batch_size, seq, n_heads, d_k]`
+        q, k, v = th.chunk(qkv, 3, dim=-1)
+
+        # Calculate scaled dot-product attention
+        attn = th.einsum("bihd,bjhd->bijh", q, k) * self.scale
+
+        # Softmax along the sequence dimension
+        attn = attn.softmax(dim=1)
+
+        # Multiply by values
+        res = th.einsum("bijh,bjhd->bihd", attn, v)
+
+        # Reshape to `[batch_size, seq, n_heads * d_k]`
+        res = res.view(batch_size, -1, self.n_heads * self.d_k)
+
+        # Transform to `[batch_size, seq, n_channels]`
+        res = self.output(res)
+
+        # Add skip connection
+        res += x
+
+        # Change to shape `[batch_size, in_channels, height, width]`
+        res = res.permute(0, 2, 1).view(batch_size, n_channels, height, width)
+
+        return res
+
+
 
 
 class ResidualBlock(ConditionedBlock):
@@ -635,8 +710,9 @@ class MiddleBlock(ConditionedBlock):
             use_scale_shift_norm=use_scale_shift_norm,
             mesh=mesh)
         
-        self.attn = th.nn.Identity() # AttentionBlock(in_channels) if attention else th.nn.Identity()
-
+        self.attn = AttentionBlock(in_channels)if attention else th.nn.Identity()
+        
+       
         self.res2 = ResidualBlock(
             in_channels,
             in_channels,

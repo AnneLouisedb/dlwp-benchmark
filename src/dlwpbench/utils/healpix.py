@@ -30,7 +30,7 @@ import numpy as np
 import torch
 import torch as th
 from einops.layers.torch import Rearrange
-
+from abc import ABC, abstractmethod
 
 # perform face folding:
 # [B, F, C, H, W] -> [B*F, C, H, W]
@@ -59,6 +59,11 @@ class HEALPixUnfoldFaces(th.nn.Module):
         tensor = torch.reshape(tensor, shape=(-1, self.num_faces, C, H, W))
     
         return tensor
+
+class ConditionedBlock(th.nn.Module):
+    @abstractmethod
+    def forward(self, x, emb):
+        """Apply the module to `x` given `emb` embedding of time or others."""
 
 
 class HEALPixLayer(th.nn.Module):
@@ -103,8 +108,58 @@ class HEALPixLayer(th.nn.Module):
         :param x: The input tensor of shape [..., F=12, H, W]
         :return: The output tensor of this HEALPix layer
         """
+       
         res = self.layers(x)
+
         return res
+
+
+class ConditionalHEALPixLayer(ConditionedBlock):
+    """
+    Pytorch module for applying any base torch Module on a HEALPix tensor. Expects all input/output tensors to have a
+    shape [..., 12, H, W], where 12 is the dimension of the faces.
+    """
+    def __init__(self, layer, **kwargs):
+        """
+        Constructor for the HEALPix base layer.
+
+        :param layer: Any torch layer function, e.g., th.nn.Conv2d
+        :param kwargs: The arguments that are passed to the torch layer function, e.g., kernel_size
+        """
+        super().__init__()
+        layers = []
+
+        # If 'layer' is a string, convert into the according function
+        if isinstance(layer, str): layer = eval(layer)
+        
+        # Define a HEALPixPadding layer if the given layer is a convolution layer
+        try:
+            if layer.__bases__[0] is th.nn.modules.conv._ConvNd and kwargs["kernel_size"] > 1:
+                kwargs["padding"] = 0  # Disable native padding
+                kernel_size = 3 if "kernel_size" not in kwargs else kwargs["kernel_size"]
+                dilation = 1 if "dilation" not in kwargs else kwargs["dilation"]
+                padding = ((kernel_size - 1)//2)*dilation
+                layers.append(HEALPixPadding(padding=padding))
+        except AttributeError:
+            print(f"Could not determine the base class of the given layer '{layer}'. No padding layer was added, "
+                   "which may not be an issue if the specified layer does not require a prevailing padding.")
+            
+        # Initialize the desired pytorch layer surrounded by tensor reshaping functions that enable the layer to
+        # process all faces in parallel on the batch dimension
+        layers.append(layer(**kwargs))
+        self.layers = th.nn.Sequential(*layers)
+
+    def forward(self, x: th.Tensor, emb=None) -> th.Tensor:
+        
+        for module in self.layers:
+            if isinstance(module, ConditionedBlock):
+                x = module(x, emb)
+            else:
+                try:
+                    x = module(x)
+                except:
+                    x = module(x, emb)
+            return x
 
 
 class HEALPixPadding(th.nn.Module):
