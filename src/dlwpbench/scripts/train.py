@@ -27,6 +27,7 @@ import io
 from losses import CustomMSELoss
 from additional_plot import *
 from helper_scripts.ema import ExponentialMovingAverage
+from evaluate import remap
 
 @hydra.main(config_path='../configs/', config_name='config', version_base=None)
 def run_training(cfg):
@@ -68,8 +69,6 @@ def run_training(cfg):
         ema = ExponentialMovingAverage(model, 0.995)
         ema.register()
      
-
-    
     if cfg.training.type == 'diffusion':
 
         betas = [cfg.training.min_noise_std ** (k / cfg.training.num_refinement_steps) for k in reversed(range(cfg.training.num_refinement_steps + 1))]
@@ -128,19 +127,21 @@ def run_training(cfg):
         stop_date=cfg.data.train_stop_date,
         sequence_length=cfg.training.sequence_length
     )
-    
+
     val_dataset = hydra.utils.instantiate(
         cfg.data,
         start_date=cfg.data.val_start_date,
         stop_date=cfg.data.val_stop_date,
         sequence_length=cfg.validation.sequence_length
     )
+   
     train_dataloader = th.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=True,
         num_workers=cfg.data.num_workers
     )
+  
     val_dataloader = th.utils.data.DataLoader(
         dataset=val_dataset,
         batch_size=cfg.validation.batch_size,
@@ -213,32 +214,28 @@ def run_training(cfg):
                 
 
                 elif cfg.training.type == 'diffusion':
-                     
 
+                    target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size-1:cfg.model.context_size])
+                    input_prog = prognostic[accum_idx]
+                     
                     if cfg.model.mesh == 'healpix':
-                        constants[accum_idx] = einops.rearrange(constants[accum_idx], "b t c f h w -> (b f) t c h w")
-                        prescribed[accum_idx] = einops.rearrange(prescribed[accum_idx], "b t c f h w -> (b f) t c h w")
-                        prognostic[accum_idx] = einops.rearrange(prognostic[accum_idx], "b t c f h w -> (b f) t c h w")
-                        target[accum_idx] = einops.rearrange(target[accum_idx], "b t c f h w -> (b f) t c h w")
-                        print("reshapeed??")
+                        input_prog = einops.rearrange(prognostic[accum_idx], "b t c f h w -> (b f) t c h w")
+                        input_target = einops.rearrange(target[accum_idx], "b t c f h w -> (b f) t c h w")
+                        target_res = (input_target - input_prog[:, cfg.model.context_size-1:cfg.model.context_size])
 
                         
-                    target_res = (target[accum_idx] - prognostic[accum_idx][:, cfg.model.context_size-1:cfg.model.context_size])
-                    print("target res", target_res.shape)
-                    
                     k = th.randint(0, cfg.training.num_refinement_steps, (1,), device=device)
                     k_scalar = k.item()
-                    batch_size = prognostic[accum_idx].shape[0]
+                    batch_size = input_prog.shape[0]
                     time_tensor = th.full((batch_size,), k_scalar, device=device)
                     # constructing the noise factor
                     noise_factor = noise_scheduler.alphas_cumprod.to(device)[k]
-                    noise_factor = noise_factor.view(-1, *[1 for _ in range(prognostic[accum_idx].ndim - 1)])
+                    noise_factor = noise_factor.view(-1, *[1 for _ in range(input_prog.ndim - 1)])
                     signal_factor = 1 - noise_factor
 
                     #target_new = target[accum_idx] 
                     noise = th.randn_like(target_res)
                     y_noised = noise_scheduler.add_noise(target_res, noise, k)
-                    
                     output = model.single_forward(constants[accum_idx], prescribed[accum_idx][:, 0:cfg.model.context_size], prognostic[accum_idx][:, 0:cfg.model.context_size], y_noised, time = time_tensor)
                     output = output.unsqueeze(1)
                     
@@ -320,29 +317,29 @@ def run_training(cfg):
                         noise_scheduler.set_timesteps(cfg.model.num_refinement_step)
                         # implement all diffusion steps
                         print("Validating Diffusion Model")
-                        outputs_ensemble = []
+                        #outputs_ensemble = []
 
-                        for _ in range(5):
-
-                            output = model(
-                            constants=constants[accum_idx] if not constants == None else None,
-                            prescribed=prescribed[accum_idx] if not prescribed == None else None,
-                            prognostic=prognostic[accum_idx],
-                            noise_scheduler = noise_scheduler, target = target[accum_idx])
-                            outputs_ensemble.append(output)
+                        output = model(
+                        constants=constants[accum_idx] if not constants == None else None,
+                        prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                        prognostic=prognostic[accum_idx],
+                        noise_scheduler = noise_scheduler, target = target[accum_idx])
+                        #outputs_ensemble.append(output)
 
                         # Calculate the mean of the 3 predictions
-                        stacked_outputs = th.stack(outputs_ensemble, dim=0) 
-                        ensemble_mean = stacked_outputs.mean(dim=0) #[B, T, C, W, H]
-                        output = ensemble_mean  # Use the ensemble mean as the final output
+                        #stacked_outputs = th.stack(outputs_ensemble, dim=0) 
+                        #ensemble_mean = stacked_outputs.mean(dim=0) #[B, T, C, W, H]
+                        #output = ensemble_mean  # Use the ensemble mean as the final output
                         
                         # Log std
-                        ensemble_std = stacked_outputs.std(dim=0)
-                        daily_std = ensemble_std.mean(dim=(0, 2, 3, 4))
+                        # ensemble_std = stacked_outputs.std(dim=0)
+                        # daily_std = ensemble_std.mean(dim=(0, 2, 3, 4))
                         
-                        wandb.log({
-                            f"ensemble_std_day_{i}": std.item() for i, std in enumerate(daily_std)
-                        })
+                        # wandb.log({
+                        #     f"ensemble_std_day_{i}": std.item() for i, std in enumerate(daily_std)
+                        # })
+                        print("OUTPUT")
+                        print(output.shape)
 
 
                     else:
@@ -379,9 +376,15 @@ def run_training(cfg):
             wandb.log(log_dict, step=iteration)
 
             # Compute the mean loss over the first time step
-            if epoch % 10 == 0 and cfg.model.mesh != 'healpix':
-
-                plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
+            # if epoch % 10 == 0:
+            #     if len(outputs_cat.shape) == 5:
+            #         print('iomage?')
+            #         # outputs_right = remap(cfg=cfg, data=outputs, name="Outputs")
+            #         # targets_right = remap(cfg=cfg, data=targets, name="Targets")
+            #         # plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
+                        
+            #     else:
+            #         plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
                
             for channel in range(outputs_cat.shape[2]):  
                 # Log the loss per channel over the entire rollout
