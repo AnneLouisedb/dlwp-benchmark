@@ -19,12 +19,13 @@ from models import *
 import utils.utils as utils
 import wandb
 import einops
+from omegaconf import OmegaConf
 
 import matplotlib.pyplot as plt
 import io
 
 # internal import 
-from losses import CustomMSELoss
+from losses import CustomMSELoss, MELRCalculator
 from additional_plot import *
 from helper_scripts.ema import ExponentialMovingAverage
 from evaluate import remap
@@ -44,7 +45,8 @@ def run_training(cfg):
         th.manual_seed(cfg.seed)
     device = th.device(cfg.device)
 
-    wandb.init(project="dlwp-benchmark_scalingup") 
+    wandb_config = OmegaConf.to_container(cfg)
+    wandb.init(project="dlwp-benchmark_scalingup", config = wandb_config) 
 
     if cfg.verbose: print("\nInitializing model")
 
@@ -91,10 +93,15 @@ def run_training(cfg):
 
     # Initialize training modules
     if cfg.model.mesh == 'healpix':
-        criterion = CustomMSELoss(healpix=True)
+        melr = MELRCalculator()
+        criterion = CustomMSELoss(healpix=True, weighted = False)
+        val_criterion = CustomMSELoss(healpix=True, weighted = True, reduction=None)
+        val_criterion_red = CustomMSELoss(healpix=True, weighted = True)
 
     else:
-        criterion = CustomMSELoss() 
+        criterion = CustomMSELoss(weighted = False) 
+        val_criterion = CustomMSELoss(weighted = True, reduction=None)
+        val_criterion_red = CustomMSELoss(weighted = True)
 
     # Load checkpoint from file to continue training or initialize training scalars
     checkpoint_path = os.path.join("outputs", cfg.model.name, "checkpoints", f"{cfg.model.name}_last.ckpt")
@@ -294,8 +301,7 @@ def run_training(cfg):
                 num_samples += output.size(0)
             epoch_train_loss = total_loss / num_samples
             
-        print('do we get here?')
-
+    
         if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
             ema.apply_shadow()
 
@@ -338,9 +344,7 @@ def run_training(cfg):
                         # wandb.log({
                         #     f"ensemble_std_day_{i}": std.item() for i, std in enumerate(daily_std)
                         # })
-                        print("OUTPUT")
-                        print(output.shape)
-
+                        
 
                     else:
                         output = model(
@@ -354,51 +358,86 @@ def run_training(cfg):
 
             
             losses = []
-            print("DONE VALIDATING")
+            
             outputs_cat = th.cat(outputs)
             targets_cat = th.cat(targets)
             variable_list = list(cfg.data.prognostic_variable_names_and_levels.keys())
 
-            criterion_wo_reduction = th.nn.MSELoss(reduction='none')
-
+            
             # MSE LOSS PER TIMESTEP - VALIDATION 
             if cfg.model.mesh == 'healpix': # [B, T, C, (F), H, W]
-                mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4, 5)).cpu().numpy()
+                mean_loss_per_time_step = val_criterion(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4, 5)).cpu().numpy()
             else: # [B, T, C, W, H]
-                mean_loss_per_time_step = criterion_wo_reduction(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()   
+                mean_loss_per_time_step = val_criterion(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()   
             
-            log_dict = {
-                f"MSE_validation/time_{i}": float(value)
-                for i, value in enumerate(mean_loss_per_time_step)
-            }
-           
+            # Create lead days (x-axis)
+            lead_days = np.arange(1, len(mean_loss_per_time_step) + 1)  # Assuming time_step is 1 day
+
+            # Create the plot data
+            table = wandb.Table(columns=["lead_day", "MSE_loss"])
+            for i, loss in enumerate(mean_loss_per_time_step):
+                table.add_data(lead_days[i], loss)
+                if i % 7 == 0:  # Log every 3 days
+                    # only add every 3 days
+                    log_dict = {f"MSE_validation/time_{i}": float(value)
+                            for i, value in enumerate(mean_loss_per_time_step)}
+
             # Log to wandb with the current iteration as the step
             wandb.log(log_dict, step=iteration)
 
-            # Compute the mean loss over the first time step
-            # if epoch % 10 == 0:
-            #     if len(outputs_cat.shape) == 5:
-            #         print('iomage?')
-            #         # outputs_right = remap(cfg=cfg, data=outputs, name="Outputs")
-            #         # targets_right = remap(cfg=cfg, data=targets, name="Targets")
-            #         # plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
-                        
-            #     else:
-            #         plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
-               
+           
+
+            # Log the table to W&B
+            wandb.log({
+                "MSE_loss_vs_lead_day": wandb.plot.line(
+                    table,
+                    x="lead_day",
+                    y="MSE_loss",
+                    title="MSE Loss vs. Lead Day"
+                )
+            })
+
+            #Compute the mean loss over the first time step
+            #if epoch % 10 == 0:
+            #if True:
+            if len(outputs_cat.shape) == 5:
+                
+                outputs_right = remap(cfg=cfg, data=outputs, name="Outputs") #  [b c lat lon]
+                targets_right = remap(cfg=cfg, data=targets, name="Targets") #  [b c lat lon]
+                
+                print(targets_right.shape) 
+
+                melr.apply(outputs_right[:, 0, :, :, :], targets_right[:, 0, :, :, :], 'msl')
+
+                plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
+                    
+            else:
+                print("SHAPE", outputs_cat.shape)
+                outputs_right = remap(cfg=cfg, data=outputs, name="Outputs") #  [b c lat lon]
+                targets_right = remap(cfg=cfg, data=targets, name="Targets") #  [b c lat lon]
+                
+                print(targets_right.shape) 
+
+                melr.apply(outputs_right[:, 0, :, :, :], targets_right[:, 0, :, :, :], 'msl')
+                plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
+
+               # plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
+
+
+            
             for channel in range(outputs_cat.shape[2]):  
                 # Log the loss per channel over the entire rollout
 
                 channel_output = outputs_cat[:, :, channel, :, :] 
                 channel_target = targets_cat[:, :, channel, :, :]
-                channel_loss = criterion(channel_output, channel_target).item()
+                channel_loss = val_criterion_red(channel_output, channel_target).item()
                 losses.append(channel_loss)
                 try:
                     wandb.log({f"MSE/validation_all_times_rollout/channel_{variable_list[channel]}":channel_loss}, step=iteration)
                 except:
                     wandb.log({f"MSE/validation_all_times_rollout/channel_{channel}":channel_loss}, step=iteration)
                 
-            epoch_val_loss = criterion(outputs_cat, targets_cat).numpy()
+            epoch_val_loss = val_criterion_red(outputs_cat, targets_cat).numpy()
 
         wandb.log({"MSE/validation": epoch_val_loss}, step=iteration)
         if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':

@@ -7,34 +7,130 @@ import numpy as np
 import torch as th
 import wandb
 
-class CustomSpectralLoss(th.nn.Module):
-    def __init__(self, reduction: str = "mean") -> None:
-        super().__init__()
-        self.reduction = reduction
+EARTH_RADIUS_M = 1000 * (6357 + 6378) / 2
+
+class ZonalSpectrum:
+    def __init__(self, variable_name: str | list[str]):
+        self.variable_name = variable_name
+
+    def _circumference(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Earth's circumference as a function of latitude."""
+        circum_at_equator = 2 * np.pi * EARTH_RADIUS_M
+        return np.cos(dataset.lat * np.pi / 180) * circum_at_equator
+
+    def lon_spacing_m(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Spacing (meters) between longitudinal values in `dataset`."""
+        diffs = dataset.lon.diff('lon')
+        if np.max(np.abs(diffs - diffs[0])) > 1e-3:
+            raise ValueError(
+                f'Expected uniform longitude spacing. {dataset.lon.values=}'
+            )
+        return self._circumference(dataset) * diffs[0].data / 360
+
+    def compute(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Computes zonal power at wavenumber and frequency."""
+        spacing = self.lon_spacing_m(dataset)
+
+        def simple_power(f_x):
+            f_k = np.fft.rfft(f_x, axis=-1, norm='forward')
+            # freq > 0 should be counted twice in power since it accounts for both
+            # positive and negative complex values.
+            one_and_many_twos = np.concatenate(([1], [2] * (f_k.shape[-1] - 1)))
+            return np.real(f_k * np.conj(f_k)) * one_and_many_twos
+
+        spectrum = xr.apply_ufunc(
+            simple_power,
+            dataset,
+            input_core_dims=[['lon']],
+            output_core_dims=[['lon']],
+            exclude_dims={'lon'},
+        ).rename_dims({'lon': 'zonal_wavenumber'})[self.variable_name]
+
+        spectrum = spectrum.assign_coords(
+            zonal_wavenumber=('zonal_wavenumber', spectrum.zonal_wavenumber.data)
+        )
         
-        path = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/weatherbench/latitude_weights/latitude_weights_5.6degree.nc'
-        weights_map = xr.open_dataset(path) 
-        self.weights = th.tensor(weights_map.weights.values).T
-
-    def forward(self, input, target):
-        self.spatial_weights = th.as_tensor(self.weights, device=input.device)
-
-        # Apply FFT
+        base_frequency = xr.DataArray(
+            np.fft.rfftfreq(len(dataset.lon)),
+            dims='zonal_wavenumber',
+            coords={'zonal_wavenumber': spectrum.zonal_wavenumber},
+        )
         
-        input_fft = th.fft.fft(input.float(), dim=-1)
-        target_fft = th.fft.fft(target.float(), dim=-1)
+        spectrum = spectrum.assign_coords(frequency=base_frequency / spacing)
+        spectrum['frequency'] = spectrum.frequency.assign_attrs(units='1 / m')
 
-        input_spectrum = th.abs(input_fft)**2
-        target_spectrum = th.abs(target_fft)**2
+        spectrum = spectrum.assign_coords(wavelength=1 / spectrum.frequency)
+        spectrum['wavelength'] = spectrum.wavelength.assign_attrs(units='m')
 
-        print('shape target', target_spectrum.shape)
+        # This last step ensures the sum of spectral components is equal to the
+        # (discrete) integral of data around a line of latitude.
+        return spectrum * self._circumference(spectrum)
 
-        spectral_diff = input_spectrum - target_spectrum
-        weighted_spectral_diff = spectral_diff * self.spatial_weights.unsqueeze(0).unsqueeze(0)
 
-        loss = th.mean(weighted_spectral_diff **2)
+def compute_zonal_spectrum(dataset: xr.Dataset, variable_name: str | list[str]) -> xr.Dataset:
+    zonal_spectrum = ZonalSpectrum(variable_name)
+    return zonal_spectrum.compute(dataset)
+
+
+class MELRCalculator:
+    def __init__(self):
+        # Load ERA5 file to get dimensions
+        era5file = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/zarr/weatherbench/msl/msl_1979_5.625deg.zarr'
+        self.era5_ds = xr.open_dataset(era5file)
         
-        return loss
+        # Define dimensions
+        self.dims = ['time', 'level', 'lat', 'lon']
+        self.coords = {dim: self.era5_ds[dim] for dim in self.dims if dim in self.era5_ds.dims}
+
+    def apply(self, pred_tensor, true_tensor, variable_name):
+        # Convert tensors to numpy arrays
+        pred_np = pred_tensor.cpu().numpy()
+        true_np = true_tensor.cpu().numpy()
+        
+        # Create xarray Datasets
+        pred_ds = xr.Dataset(
+            {variable_name: (list(self.coords.keys()), pred_np)},
+            coords=self.coords
+        )
+        
+        true_ds = xr.Dataset(
+            {variable_name: (list(self.coords.keys()), true_np)},
+            coords=self.coords
+        )
+        
+        # Compute zonal spectra
+        pred_spectrum = compute_zonal_spectrum(pred_ds, variable_name)
+        true_spectrum = compute_zonal_spectrum(true_ds, variable_name)
+        
+        # Compute MELR
+        E_pred = pred_spectrum[variable_name]
+        E_true = true_spectrum[variable_name]
+        
+        # Add a small epsilon to avoid division by zero or log of zero
+        epsilon = 1e-10
+        log_ratio = np.log(E_pred + epsilon) / (E_true + epsilon)
+        
+        # Average over all dimensions
+        melr = log_ratio.mean().values
+
+        # Create the plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(wavenumbers, avg_log_ratio)
+        plt.xlabel('Zonal Wavenumber')
+        plt.ylabel('MELR')
+        plt.title(f'MELR vs Zonal Wavenumber for {variable_name}')
+        plt.xscale('log')
+        plt.yscale('symlog')  # Use symlog scale for y-axis to handle both positive and negative values
+        plt.grid(True)
+        
+        # Save the plot and log it to wandb
+        plt.savefig('melr_plot.png')
+        wandb.log({"MELR_plot": wandb.Image('melr_plot.png')})
+        
+        # Close the plot to free up memory
+        plt.close()
+        
+        return melr
         
 
 class CustomMSELoss(th.nn.Module):
@@ -46,9 +142,10 @@ class CustomMSELoss(th.nn.Module):
         reduction (str, optional): Reduction method. Defaults to "mean".
     """
 
-    def __init__(self, reduction: str = "mean", healpix=False) -> None:
+    def __init__(self, reduction: str = "mean", healpix=False, weighted = False) -> None:
         super().__init__()
         self.reduction = reduction
+        self.weighted = weighted
 
         if healpix:
             path = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/zarr/weatherbench_hpx8/latitude_weights/latitude_weights_5.625deg.zarr'
@@ -63,9 +160,16 @@ class CustomMSELoss(th.nn.Module):
             
     def forward(self, input, target):
         
-        self.spatial_weights = th.as_tensor(self.weights, device=input.device)
 
-        d = ((target-input)**2) #*self.spatial_weights 
+        if self.weighted:
+            self.spatial_weights = th.as_tensor(self.weights, device=input.device)
+            d = ((target-input)**2)*self.spatial_weights 
+        else:
+            d = ((target-input)**2)
 
-        return th.mean(d)
+        if self.reduction == 'mean':
+            return th.mean(d)
+        else:
+            # No reduction
+            return d
     
