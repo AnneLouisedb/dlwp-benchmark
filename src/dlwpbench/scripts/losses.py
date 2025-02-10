@@ -6,6 +6,7 @@ import xarray as xr
 import numpy as np
 import torch as th
 import wandb
+import matplotlib.pyplot as plt
 
 EARTH_RADIUS_M = 1000 * (6357 + 6378) / 2
 
@@ -81,11 +82,11 @@ class MELRCalculator:
         # Define dimensions
         self.dims = ['time', 'level', 'lat', 'lon']
         self.coords = {dim: self.era5_ds[dim] for dim in self.dims if dim in self.era5_ds.dims}
+        # Reset time coordinate to array of 16
+        self.coords['time'] = np.arange(16)
 
-    def apply(self, pred_tensor, true_tensor, variable_name):
+    def apply(self, pred_np, true_np, variable_name):
         # Convert tensors to numpy arrays
-        pred_np = pred_tensor.cpu().numpy()
-        true_np = true_tensor.cpu().numpy()
         
         # Create xarray Datasets
         pred_ds = xr.Dataset(
@@ -103,29 +104,47 @@ class MELRCalculator:
         true_spectrum = compute_zonal_spectrum(true_ds, variable_name)
         
         # Compute MELR
-        E_pred = pred_spectrum[variable_name]
-        E_true = true_spectrum[variable_name]
-        
-        # Add a small epsilon to avoid division by zero or log of zero
-        epsilon = 1e-10
-        log_ratio = np.log(E_pred + epsilon) / (E_true + epsilon)
-        
-        # Average over all dimensions
-        melr = log_ratio.mean().values
+        E_pred = pred_spectrum.mean(dim='time').mean('lat')
+        E_true = true_spectrum.mean(dim='time').mean('lat')
 
         # Create the plot
         plt.figure(figsize=(10, 6))
-        plt.plot(wavenumbers, avg_log_ratio)
+        plt.plot(E_pred, label='Predicted')
+        plt.plot(E_true, label='True')
         plt.xlabel('Zonal Wavenumber')
-        plt.ylabel('MELR')
-        plt.title(f'MELR vs Zonal Wavenumber for {variable_name}')
-        plt.xscale('log')
-        plt.yscale('symlog')  # Use symlog scale for y-axis to handle both positive and negative values
+        plt.ylabel('Energy')
+        plt.title(f'Energy vs Zonal Wavenumber for {variable_name}')
+        plt.xscale('log', base=2)
+        plt.yscale('log', base=2) 
+        plt.legend()
         plt.grid(True)
         
         # Save the plot and log it to wandb
-        plt.savefig('melr_plot.png')
-        wandb.log({"MELR_plot": wandb.Image('melr_plot.png')})
+        plt.savefig(f'Energy_plot_{variable_name}.png')
+        wandb.log({"Energy_plot": wandb.Image(f'Energy_plot_{variable_name}.png')})
+        
+        # Close the plot to free up memory
+        plt.close()
+
+        # Add a small epsilon to avoid division by zero or log of zero
+        epsilon = 1e-10
+        ratio = np.log((E_pred + epsilon) / (E_true + epsilon))
+        
+        # Average over all dimensions
+        melr = ratio.mean().values
+
+        # Create the plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(ratio)
+        plt.xlabel('Zonal Wavenumber')
+        plt.ylabel('MELR')
+        plt.title(f'MELR vs Zonal Wavenumber for {variable_name}')
+        plt.xscale('log', base=2)
+        plt.grid(True)
+        
+        # Save the plot and log it to wandb
+        plt.savefig(f'melr_plot_{variable_name}.png')
+        wandb.log({"MELR_plot": wandb.Image(f'melr_plot_{variable_name}.png')})
         
         # Close the plot to free up memory
         plt.close()

@@ -150,6 +150,7 @@ class HEALPixRemap():
 
         # Load .nc file in latlon format
         ds_ll = xr.open_dataset(file_path, engine="zarr" if "zarr" in file_path else "netcdf4")
+
         if times is not None: ds_ll = ds_ll.sel({"time": times})
 
         # Set up coordinates and chunksizes for the HEALPix dataset
@@ -587,11 +588,17 @@ def project_ll_to_hpx(
     )
 
     file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "weatherbench", vname, f"*.{extension}")))
+    print(os.path.join("data", file_format, "weatherbench", vname, f"*.{extension}"))
     for file_path_ll in file_paths_ll:
         filename = os.path.basename(file_path_ll)
         print(f"Working on {filename}")
         if vname == "constants":
             curr_dst_path = os.path.join(dst_path, f"constants_hpx{nside}_5.625deg.{extension}")
+        elif vname == 'latitude_weights':
+            curr_dst_path = os.path.join(dst_path, f"latitude_weights_5.625deg.{extension}")
+            file_path_ll = '/home/adboer/dlwp-benchmark/src/dlwpbench/latitude_weights.nc'
+            remapper.remap(file_path=file_path_ll, poolsize=poolsize, dst_path=curr_dst_path, const=True)
+
         else:
             year = int(re.search(r'(19|20)\d{2}', filename).group(0))
             curr_dst_path = os.path.join(dst_path, f"{vname}_{year}_hpx{nside}_5.625deg.{extension}")
@@ -604,7 +611,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Projection class from LatLon to HEALPix and reverse. Calling this script with a variable_name as "
                     "-v argument invokes the conversion of the respective files from LatLon to HEALPix.")
-    parser.add_argument("-v", "--variable-name", type=str, default="geopotential",
+    parser.add_argument("-v", "--variable-name", type=str, default="stream500",
                         help="The variable to be converted, for example '2m_temperature' or 'geopotential'.")
     parser.add_argument("--latitudes", type=int, default=32)
     parser.add_argument("--longitudes", type=int, default=64)

@@ -365,9 +365,11 @@ def run_training(cfg):
 
             
             # MSE LOSS PER TIMESTEP - VALIDATION 
-            if cfg.model.mesh == 'healpix': # [B, T, C, (F), H, W]
+            if cfg.model.mesh == 'healpix': 
+                # [B, T, C, (F), H, W]
                 mean_loss_per_time_step = val_criterion(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4, 5)).cpu().numpy()
-            else: # [B, T, C, W, H]
+            else: 
+                # [B, T, C, W, H]
                 mean_loss_per_time_step = val_criterion(outputs_cat, targets_cat).mean(dim=(0, 2, 3, 4)).cpu().numpy()   
             
             # Create lead days (x-axis)
@@ -377,7 +379,7 @@ def run_training(cfg):
             table = wandb.Table(columns=["lead_day", "MSE_loss"])
             for i, loss in enumerate(mean_loss_per_time_step):
                 table.add_data(lead_days[i], loss)
-                if i % 7 == 0:  # Log every 3 days
+                if i % 7 == 0:  # Log every 7 days
                     # only add every 3 days
                     log_dict = {f"MSE_validation/time_{i}": float(value)
                             for i, value in enumerate(mean_loss_per_time_step)}
@@ -398,30 +400,24 @@ def run_training(cfg):
             })
 
             #Compute the mean loss over the first time step
-            #if epoch % 10 == 0:
-            #if True:
-            if len(outputs_cat.shape) == 5:
+            if epoch % 5 == 0:
+
+                # remapping the MSLP from HPX to lat-lon representation
+                outputs_right_0 = remap(cfg=cfg, data=outputs_cat[:, 0, :, :, :, :], name="Outputs") #  [b c lat lon]
+                targets_right_0 = remap(cfg=cfg, data=targets_cat[:, 0, :, :, :, :], name="Targets") #  [b c lat lon]
                 
-                outputs_right = remap(cfg=cfg, data=outputs, name="Outputs") #  [b c lat lon]
-                targets_right = remap(cfg=cfg, data=targets, name="Targets") #  [b c lat lon]
+                # Plotting the MELR metric to lead-day 1
+                melr.apply(outputs_right_0[:, 0, :, :], targets_right_0[:, 0, :, :], f'msl1_{epoch}')
+
+                outputs_right_7 = remap(cfg=cfg, data=outputs_cat[:, 7, :, :, :, :], name="Outputs") #  [b c lat lon]
+                targets_right_7 = remap(cfg=cfg, data=targets_cat[:, 7, :, :, :, :], name="Targets") #  [b c lat lon]
                 
-                print(targets_right.shape) 
+                # Plotting the MELR metric to lead-day 7
+                melr.apply(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], f'msl7_{epoch}')
 
-                melr.apply(outputs_right[:, 0, :, :, :], targets_right[:, 0, :, :, :], 'msl')
+                #plot_rmse_per_gridpoint(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], epoch)
 
-                plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
-                    
-            else:
-                print("SHAPE", outputs_cat.shape)
-                outputs_right = remap(cfg=cfg, data=outputs, name="Outputs") #  [b c lat lon]
-                targets_right = remap(cfg=cfg, data=targets, name="Targets") #  [b c lat lon]
-                
-                print(targets_right.shape) 
-
-                melr.apply(outputs_right[:, 0, :, :, :], targets_right[:, 0, :, :, :], 'msl')
-                plot_rmse_per_gridpoint(outputs_right, targets_right, epoch)
-
-               # plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
+                # plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
 
 
             
