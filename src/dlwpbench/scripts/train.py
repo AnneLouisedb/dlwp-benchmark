@@ -78,7 +78,7 @@ def run_training(cfg):
         noise_scheduler = DDPMScheduler(
             num_train_timesteps=cfg.training.num_refinement_steps + 1,
             trained_betas=betas,
-            prediction_type="v_prediction", # shouldnt this be "epsilon"
+            prediction_type="v_prediction", 
             clip_sample=False,
         )
         # For Diffusion models and models in general working on small errors,
@@ -93,10 +93,13 @@ def run_training(cfg):
 
     # Initialize training modules
     if cfg.model.mesh == 'healpix':
-        melr = MELRCalculator()
-        criterion = CustomMSELoss(healpix=True, weighted = False)
-        val_criterion = CustomMSELoss(healpix=True, weighted = True, reduction=None)
-        val_criterion_red = CustomMSELoss(healpix=True, weighted = True)
+        melr = MELRCalculator(cfg)
+        # used for training
+        criterion = CustomMSELoss(cfg,weighted = False)
+        # used for creating latitude-weighted RMSE and ACC
+        val_criterion = CustomMSELoss(cfg,weighted = True, reduction=None)
+        # used for creating latitude-weighted per-variable loss
+        val_criterion_red = CustomMSELoss(cfg, weighted = True)
 
     else:
         criterion = CustomMSELoss(weighted = False) 
@@ -263,13 +266,35 @@ def run_training(cfg):
                         prognostic=prognostic[accum_idx]
                     )
 
-                
+                # unweighted-mse loss for training
                 train_loss = criterion(output, target[accum_idx])
                 train_loss.backward()
 
+
                 if cfg.training.type == 'diffusion' or cfg.training.type =='dyfusion':
-                    wandb.log({f"MSE/{k_scalar}_training": train_loss}, step=iteration)
-                    
+                
+                    x_axis_plot = np.arange(cfg.training.num_refinement_steps)  
+                    # Create the plot data
+                    table = wandb.Table(columns=["step", "MSE_train_loss"])
+                    log_dict = {}
+
+                    table.add_data(x_axis_plot[k_scalar], train_loss)
+  
+                    log_dict[f"MSE_training/time_{k_scalar}"] = train_loss
+
+                    # Log to wandb with the current iteration as the step
+                    wandb.log(log_dict, step=iteration)
+
+                    # Log the table to W&B
+                    wandb.log({
+                        "MSE_train_loss_vs_lead_day": wandb.plot.line(
+                            table,
+                            x="beta",
+                            y="MSE_train_loss",
+                            title="MSE Training Loss vs. beta"
+                        )
+                    })
+
 
                 if cfg.training.clip_gradients:
                     try:
@@ -296,6 +321,7 @@ def run_training(cfg):
             for output, target in zip(outputs, targets):
                 output = output.cpu()
                 target = target.cpu()
+                # unweighted mse loss for trainnig
                 batch_loss = criterion(output, target).item()
                 total_loss += batch_loss * output.size(0)
                 num_samples += output.size(0)
@@ -376,7 +402,7 @@ def run_training(cfg):
             lead_days = np.arange(1, len(mean_loss_per_time_step) + 1)  # Assuming time_step is 1 day
 
             # Create the plot data
-            table = wandb.Table(columns=["lead_day", "MSE_loss"])
+            table = wandb.Table(columns=["lead_day", "latitude-weighted MSE_loss"])
             for i, loss in enumerate(mean_loss_per_time_step):
                 table.add_data(lead_days[i], loss)
                 if i % 7 == 0:  # Log every 7 days
@@ -388,7 +414,6 @@ def run_training(cfg):
             wandb.log(log_dict, step=iteration)
 
            
-
             # Log the table to W&B
             wandb.log({
                 "MSE_loss_vs_lead_day": wandb.plot.line(
@@ -403,22 +428,19 @@ def run_training(cfg):
             if epoch % 5 == 0:
 
                 # remapping the MSLP from HPX to lat-lon representation
-                outputs_right_0 = remap(cfg=cfg, data=outputs_cat[:, 0, :, :, :, :], name="Outputs") #  [b c lat lon]
-                targets_right_0 = remap(cfg=cfg, data=targets_cat[:, 0, :, :, :, :], name="Targets") #  [b c lat lon]
+                outputs_right_0 = remap(cfg=cfg, data=outputs_cat[:, 0, :, :, :, :], name="Outputs") #  [b t, f?, c lat lon]
+                targets_right_0 = remap(cfg=cfg, data=targets_cat[:, 0, :, :, :, :], name="Targets") #  [b t, f, c lat lon]
                 
                 # Plotting the MELR metric to lead-day 1
-                melr.apply(outputs_right_0[:, 0, :, :], targets_right_0[:, 0, :, :], f'msl1_{epoch}')
+                melr.apply(outputs_right_0[:, 0, :, :], targets_right_0[:, 0, :, :], variable_name=f'msl_day1', epoch = epoch)
 
                 outputs_right_7 = remap(cfg=cfg, data=outputs_cat[:, 7, :, :, :, :], name="Outputs") #  [b c lat lon]
                 targets_right_7 = remap(cfg=cfg, data=targets_cat[:, 7, :, :, :, :], name="Targets") #  [b c lat lon]
                 
                 # Plotting the MELR metric to lead-day 7
-                melr.apply(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], f'msl7_{epoch}')
+                melr.apply(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], variable_name=f'msl_day7', epoch = epoch)
 
-                #plot_rmse_per_gridpoint(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], epoch)
-
-                # plot_rmse_per_gridpoint(outputs_cat, targets_cat, epoch)
-
+                plot_rmse_per_gridpoint(outputs_right_7[:, 0, :, :], targets_right_7[:, 0, :, :], epoch)
 
             
             for channel in range(outputs_cat.shape[2]):  

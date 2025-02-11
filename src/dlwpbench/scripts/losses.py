@@ -1,12 +1,15 @@
 import os
 import sys
+import glob
 import time
+import re
 import threading
 import xarray as xr
 import numpy as np
 import torch as th
 import wandb
 import matplotlib.pyplot as plt
+
 
 EARTH_RADIUS_M = 1000 * (6357 + 6378) / 2
 
@@ -75,18 +78,15 @@ def compute_zonal_spectrum(dataset: xr.Dataset, variable_name: str | list[str]) 
 
 class MELRCalculator:
     def __init__(self):
-        # Load ERA5 file to get dimensions
-        era5file = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/zarr/weatherbench/msl/msl_1979_5.625deg.zarr'
-        self.era5_ds = xr.open_dataset(era5file)
-        
-        # Define dimensions
-        self.dims = ['time', 'level', 'lat', 'lon']
-        self.coords = {dim: self.era5_ds[dim] for dim in self.dims if dim in self.era5_ds.dims}
-        # Reset time coordinate to array of 16
-        self.coords['time'] = np.arange(16)
-
-    def apply(self, pred_np, true_np, variable_name):
+        pass
+       
+    def apply(self, pred_np, true_np, variable_name, epoch):
         # Convert tensors to numpy arrays
+        sample_dim, lat_dim, lon_dim = pred_np.shape
+
+        self.coords['sample'] = np.arange(sample_dim)
+        self.coords['lat'] = np.linspace(-90, 90, lat_dim)
+        self.coords['lon'] = np.linspace(0, 360, lon_dim)
         
         # Create xarray Datasets
         pred_ds = xr.Dataset(
@@ -98,34 +98,21 @@ class MELRCalculator:
             {variable_name: (list(self.coords.keys()), true_np)},
             coords=self.coords
         )
-        
+
         # Compute zonal spectra
         pred_spectrum = compute_zonal_spectrum(pred_ds, variable_name)
         true_spectrum = compute_zonal_spectrum(true_ds, variable_name)
         
         # Compute MELR
-        E_pred = pred_spectrum.mean(dim='time').mean('lat')
-        E_true = true_spectrum.mean(dim='time').mean('lat')
+        E_pred = pred_spectrum.mean(dim='sample').mean('lat')
+        E_true = true_spectrum.mean(dim='sample').mean('lat')
 
-        # Create the plot
-        plt.figure(figsize=(10, 6))
-        plt.plot(E_pred, label='Predicted')
-        plt.plot(E_true, label='True')
-        plt.xlabel('Zonal Wavenumber')
-        plt.ylabel('Energy')
-        plt.title(f'Energy vs Zonal Wavenumber for {variable_name}')
-        plt.xscale('log', base=2)
-        plt.yscale('log', base=2) 
-        plt.legend()
-        plt.grid(True)
+    
+        # Transform data to log base 2 for both axes (zonal wavenumber and energy/MELR values)
+        log_wavenumbers = np.log2(np.arange(len(E_pred)) + 1)  # Add 1 to avoid log2(0)
+        log_E_pred = np.log2(E_pred + epsilon)
+        log_E_true = np.log2(E_true + epsilon)
         
-        # Save the plot and log it to wandb
-        plt.savefig(f'Energy_plot_{variable_name}.png')
-        wandb.log({"Energy_plot": wandb.Image(f'Energy_plot_{variable_name}.png')})
-        
-        # Close the plot to free up memory
-        plt.close()
-
         # Add a small epsilon to avoid division by zero or log of zero
         epsilon = 1e-10
         ratio = np.log((E_pred + epsilon) / (E_true + epsilon))
@@ -133,22 +120,35 @@ class MELRCalculator:
         # Average over all dimensions
         melr = ratio.mean().values
 
-        # Create the plot
-        plt.figure(figsize=(10, 6))
-        plt.plot(ratio)
-        plt.xlabel('Zonal Wavenumber')
-        plt.ylabel('MELR')
-        plt.title(f'MELR vs Zonal Wavenumber for {variable_name}')
-        plt.xscale('log', base=2)
-        plt.grid(True)
+        table = wandb.Table(columns=["Log2(Zonal Wavenumber)", "Log2(E_pred)", "Log2(E_true)", "MELR", "Epoch"])
+
+        for i in range(len(log_wavenumbers)):
+            table.add_data(log_wavenumbers[i], log_E_pred[i].values, log_E_true[i].values, ratio[i].values, epoch)
+
+        wandb.log({f"{variable_name}_MELR_Log2_Table": table}) 
+        # filter the table for the latest epoch
+        energy_plot = wandb.plot.line(
+        table,
+        x="Log2(Zonal Wavenumber)",
+        y=["Log2(E_pred)", "Log2(E_true)"],  
+        keys=["Predicted Energy", "True Energy"], 
+        title=f"Energy vs. Zonal Wavenumber for {variable_name}",
+        xname="Log2(Zonal Wavenumber)",
         
-        # Save the plot and log it to wandb
-        plt.savefig(f'melr_plot_{variable_name}.png')
-        wandb.log({"MELR_plot": wandb.Image(f'melr_plot_{variable_name}.png')})
-        
-        # Close the plot to free up memory
-        plt.close()
-        
+        )
+        # Log the custom plot to W&B
+        wandb.log({f"{variable_name}_Energy_vs_Zonal_Wavenumber": energy_plot})
+
+        melr_plot = wandb.plot.line(
+            table,
+            x="Log2(Zonal Wavenumber)",
+            y="MELR",
+            title=f"MELR vs. Zonal Wavenumber for {variable_name}",
+            xname="Log2(Zonal Wavenumber)",
+            keys=["Epoch"]
+        )
+        wandb.log({f"{variable_name}_MELR_vs_Zonal_Wavenumber": melr_plot})
+
         return melr
         
 
@@ -161,21 +161,16 @@ class CustomMSELoss(th.nn.Module):
         reduction (str, optional): Reduction method. Defaults to "mean".
     """
 
-    def __init__(self, reduction: str = "mean", healpix=False, weighted = False) -> None:
+    def __init__(self, cfg, reduction: str = "mean", weighted = False) -> None:
         super().__init__()
         self.reduction = reduction
         self.weighted = weighted
 
-        if healpix:
-            path = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/zarr/weatherbench_hpx8/latitude_weights/latitude_weights_5.625deg.zarr'
-            weights_map = xr.open_dataset(path)
-            weights_values = np.nan_to_num(weights_map.weights.values, nan=0.0)
-            self.weights = th.tensor(weights_values) 
-
-        else:
-            path = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/weatherbench/latitude_weights/latitude_weights_5.6degree.nc'
-            weights_map = xr.open_dataset(path) 
-            self.weights = th.tensor(weights_map.weights.values).T
+        data_path = cfg.data.data_path + 'constants/'
+        zarr_files = glob.glob(os.path.join(data_path, 'constants*.zarr'))
+        dataset = xr.open_zarr(zarr_files[0])
+        weights_values = np.nan_to_num(dataset.latitude_weights.values, nan=0.0)
+        self.weights = th.tensor(weights_values)
             
     def forward(self, input, target):
         
