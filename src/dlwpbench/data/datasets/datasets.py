@@ -203,18 +203,20 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             }
         },
         'msl': {"file_name": "msl",
-            "mean": 100958.9342887361,
-"std": 1302.149826386961},
+            "mean": 100958.9342887361, "std": 1302.149826386961},
         'sst': {"file_name": "sst",
-            "mean": 290.31263675008245,
-"std": 11.372437606024592}
+            "mean": 290.31263675008245,"std": 11.372437606024592}
         ,
-        'stream': {"file_name": "stream500",
-            "mean": 2355273.207031221,
-"std": 42371255.252134465},
-'stream250': {"file_name": "stream250",
-           "mean": 3279301.066678744,
-"std": 88087550.26655602}
+        'stream250': {"file_name": "stream250", "mean": 3279301.066678744, "std": 88087550.26655602},
+        'stream500':  {"file_name": "stream500", "mean": 2355273.207031221,  "std": 42371255.252134465},
+
+        'stream': {"file_name": "stream",
+                   "level": {250: { "mean": 3279301.066678744,
+                "std": 88087550.26655602},
+                                500: {"mean": 2355273.207031221,
+                "std": 42371255.252134465}}
+                            
+            } 
         ,
         "tisr": {
             "file_name": "toa_incident_solar_radiation",
@@ -316,8 +318,6 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             chunkdict = dict(time=self.sequence_length+1, lat=height, lon=width)
         self.ds = self.ds.chunk(chunkdict).load()
         print(f"took {time.time() - a} seconds")
-        print("dataset")
-        print(self.ds.time)
         
         # Downscale dataset if desired
         if downscale_factor > 1:
@@ -328,6 +328,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         if constant_names:
             constants = []
             for c in constant_names:
+                
                 lazy_data = self.ds[c]
                 if self.normalize: lazy_data = (lazy_data-self.stats[c]["mean"])/self.stats[c]["std"]
                 constants.append(lazy_data.compute())
@@ -368,8 +369,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                                    self.init_dates[item]+pd.Timedelta(f"{self.sequence_length*self.timedelta}h"))
                     
                     )
-                #print("lazy data time - input vector from dataloader")   
-                #print(lazy_data.time)
+               
                 if self.init_dates is not None and self.sequence_length > len(lazy_data.time):
                     # Augment TISR with values from 2017 when exceeding the date of the stored data
                     manual_tisr = True 
@@ -378,15 +378,18 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                     stop_date = self.init_dates[item] + pd.Timedelta(f"{self.sequence_length*self.timedelta*24}h")
                     dates = pd.date_range(start=start_date, end=stop_date, freq=f"{self.timedelta*24}h")
                     lazy_data = lazy_data.values
+                   
                     tmp = list()
                     # Overide year with 2017 under consideration of leap years
                     for date in dates[-diff:]:
                         date = date.replace(year=2017, day=28) if date.month == 2 and date.day > 28 else date.replace(year=2017)
                         tmp.append(self.ds.tisr.sel(time=date).values)
                     lazy_data = np.concatenate((lazy_data, np.array(tmp)))
+                    #print(lazy_data)
                 if self.normalize: lazy_data = (lazy_data-self.stats[p]["mean"])/self.stats[p]["std"]
                 prescribed.append(lazy_data.compute() if not manual_tisr else lazy_data)  # Loads data into memory
             prescribed = np.float32(np.stack(prescribed, axis=1))
+           
         else:
             prescribed = th.nan  # Dummy tensor returned if no prescribed variables are used
 
@@ -400,7 +403,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             else:
                 lazy_data = self.ds[p].sel(
                     time=slice(self.init_dates[item],
-                               self.init_dates[item]+pd.Timedelta(f"{(self.sequence_length+1)*self.timedelta}h"))
+                               self.init_dates[item]+pd.Timedelta(f"{(self.sequence_length+1)*self.timedelta*24}h"))
                 )
             # Load the data to memory
             if "level" in lazy_data.coords:
@@ -417,6 +420,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         prognostic = np.float32(np.stack(prognostic, axis=1)) # stack along the time dimension
         # Append zeros to the prog. vars when exceeding the date of the stored data (required for long rollouts)
         if len(prognostic) < self.sequence_length:
+            print("adding zero's to the target?")
             diff = self.sequence_length - len(prognostic)
             fill = np.zeros((diff, *prognostic.shape[1:]), dtype=np.float32)
             prognostic = np.concatenate((prognostic, fill), axis=0)
@@ -465,6 +469,37 @@ class WeatherBenchDataset(th.utils.data.Dataset):
 
 
 if __name__ == "__main__":
+    def make_biweekly_inits(
+        start: str = "2017-01-01T00:00:00.000000000",
+        end: str = "2017-10-20T00:00:00.000000000",
+        sequence_length: int = 15,
+        timedelta: int = 1 
+    ):
+        # Convert start and end to pandas Timestamp objects with UTC timezone
+        start_date = pd.Timestamp(start, tz='UTC')  #+ pd.Timedelta(hours=sequence_length*timedelta*24)
+        end_date = pd.Timestamp(end, tz='UTC') - pd.Timedelta(hours=sequence_length*timedelta*24)
+        
+        # Generate date range for Mondays at 11:00 UTC
+        mondays = pd.date_range(start=start_date, end=end_date, freq='W-MON', tz='UTC').map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+        
+        # Generate date range for Thursdays at 11:00 UTC
+        thursdays = pd.date_range(start=start_date, end=end_date, freq='W-THU', tz='UTC').map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+        
+        # Combine Mondays and Thursdays
+        all_dates = mondays.union(thursdays).sort_values()
+
+        naive_timestamp = all_dates.tz_localize(None)
+        print(naive_timestamp)
+
+        return naive_timestamp.to_numpy()
+
+
+    init_dates = make_biweekly_inits(
+            #start=cfg.data.test_start_date,
+            #end=cfg.data.test_stop_date,
+            sequence_length=14,
+            timedelta=1
+    )
 
     # Example of creating a WeatherBench dataset for the PyTorch DataLoader
     dataset = WeatherBenchDataset(
@@ -498,19 +533,25 @@ if __name__ == "__main__":
         sequence_length=15,
         noise=0.0,
         normalize=True,
-        downscale_factor=1
+        downscale_factor=1,
+        init_dates=init_dates,
+        start_date='2017-01-01',
+        stop_date='2018-12-31',
+     
     )
-    
+    print(f"Dataset length: {len(dataset)}")
 
     train_dataloader = th.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=1,
-        shuffle=True,
+        batch_size=2,
+        shuffle=False,
         num_workers=0
     )
 
+    # HERE I GET AN ERROR
     for constants, prescribed, prognostic, target in train_dataloader:
         print(constants.shape, prescribed.shape, prognostic.shape, target.shape)
+        print(target)
         
         break
 
