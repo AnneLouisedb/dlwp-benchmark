@@ -9,4 +9,7 @@ from .fourcastnet.fourcastnet import AFNONet as FourCastNet
 #from .mgn.meshgraphnet import MeshGraphNet
 from .panguweather.panguweather import PanguWeather
 from .swintransformer.swin_transformer import SwinTransformer, SwinTransformerHPX
-from .unet.unet import UNet, UNetHPX, ModernUNet
+from .unet.unet import UNet, UNetHPX, ModernUNet, MUNetHPX
+
+# Diffusion models
+from .diffusion_models.modern_unet.modern_unet import DiffModernUNet, DiffMUNetHPX

@@ -172,11 +172,15 @@ class MUNetHPX(ModernUNet):
         tensors = []
         if constants is not None: tensors.append(einops.rearrange(constants[:, 0], "b c f h w -> (b f) c h w"))
         if prescribed is not None: tensors.append(einops.rearrange(prescribed, "b t c f h w -> (b f) (t c) h w"))
-        if prognostic is not None: tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w"))
+        if prognostic is not None:
+            if prognostic.ndim == 6:
+                tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w"))
+            elif prognostic.ndim == 5:
+                tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
+ 
         return th.cat(tensors, dim=1)
-
-
-
+            
+            
 class UNet(th.nn.Module):
     """
     A UNet implementation.
@@ -202,7 +206,7 @@ class UNet(th.nn.Module):
         self.mesh = mesh
         
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
-        print("In channels UNet from initialization", in_channels)
+        
         self.encoder = UNetEncoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,

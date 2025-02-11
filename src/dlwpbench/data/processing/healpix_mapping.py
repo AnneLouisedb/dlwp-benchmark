@@ -156,7 +156,7 @@ class HEALPixRemap():
         # Set up coordinates and chunksizes for the HEALPix dataset
         coords = {}
         if "time" in list(ds_ll.coords): coords["time"] = ds_ll.coords["time"]
-        if "level" in list(ds_ll.coords): coords["level"] = ds_ll.coords["level"]
+       # if "level" in list(ds_ll.coords): coords["level"] = ds_ll.coords["level"]
         coords["face"] = np.array(range(12), dtype=np.int64)
         coords["height"] = np.array(range(self.nside), dtype=np.int64)
         coords["width"] = np.array(range(self.nside), dtype=np.int64)
@@ -167,6 +167,8 @@ class HEALPixRemap():
             data_vars = {vname: (list(coords.keys()), self.ll2hpx(data=ds_ll.variables[vname].values))
                          for vname in list(ds_ll.keys())}
             ds_hpx = xr.Dataset(coords=coords, data_vars=data_vars, attrs=ds_ll.attrs)
+            
+
         else:
             # Get the variable name and determine the dimensions
             vname = list(ds_ll.keys())[0]
@@ -182,11 +184,11 @@ class HEALPixRemap():
                 pbar = tqdm(ds_ll.coords["time"], disable=not self.verbose)
                 for s_idx, sample in enumerate(pbar):
                     pbar.set_description("Remapping time steps")
-                    if "level" in list(ds_ll.coords):
-                        for l_idx, level in enumerate(ds_ll.coords["level"]):
-                            data_hpx[s_idx, l_idx] = self.ll2hpx(data=ds_ll.variables[vname][s_idx, l_idx].values)
-                    else:
-                        data_hpx[s_idx] = self.ll2hpx(data=ds_ll.variables[vname][s_idx].values)
+                    # if "level" in list(ds_ll.coords):
+                        # for l_idx, level in enumerate(ds_ll.coords["level"]):
+                        #     data_hpx[s_idx, l_idx] = self.ll2hpx(data=ds_ll.variables[vname][s_idx, l_idx].values)
+                    # else:
+                    data_hpx[s_idx] = self.ll2hpx(data=ds_ll.variables[vname][s_idx].values)
             else:
                 # Parallel sample mapping with 'poolsize' processes.
 
@@ -587,21 +589,26 @@ def project_ll_to_hpx(
         resolution_factor=resolution_factor
     )
 
-    file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "weatherbench", vname, f"*.{extension}")))
-    print(os.path.join("data", file_format, "weatherbench", vname, f"*.{extension}"))
+    file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_1.0", vname, f"*.{extension}")))
+    #file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_5.625", vname, f"*.{extension}")))
+    deg = 1.0 #
+    print(os.path.join("data", file_format, "ERA5_1.0", vname, f"*.{extension}"))
     for file_path_ll in file_paths_ll:
         filename = os.path.basename(file_path_ll)
         print(f"Working on {filename}")
         if vname == "constants":
-            curr_dst_path = os.path.join(dst_path, f"constants_hpx{nside}_5.625deg.{extension}")
-        elif vname == 'latitude_weights':
-            curr_dst_path = os.path.join(dst_path, f"latitude_weights_5.625deg.{extension}")
-            file_path_ll = '/home/adboer/dlwp-benchmark/src/dlwpbench/latitude_weights.nc'
-            remapper.remap(file_path=file_path_ll, poolsize=poolsize, dst_path=curr_dst_path, const=True)
+            curr_dst_path = os.path.join(dst_path, f"constants_hpx{nside}_{deg}deg.{extension}")
+        # elif vname =='stream':
+        #     curr_dst_path = os.path.join(dst_path, f"stream_hpx{nside}_{deg}deg.{extension}")
+
+        # elif vname == 'latitude_weights':
+        #     curr_dst_path = os.path.join(dst_path, f"latitude_weights_1.0deg.{extension}")
+        #     file_path_ll = '/home/adboer/dlwp-benchmark/src/dlwpbench/latitude_weights.nc'
+        #     remapper.remap(file_path=file_path_ll, poolsize=poolsize, dst_path=curr_dst_path, const=True)
 
         else:
             year = int(re.search(r'(19|20)\d{2}', filename).group(0))
-            curr_dst_path = os.path.join(dst_path, f"{vname}_{year}_hpx{nside}_5.625deg.{extension}")
+            curr_dst_path = os.path.join(dst_path, f"{vname}_{year}_hpx{nside}_{deg}deg.{extension}")
         if os.path.exists(curr_dst_path): continue
         remapper.remap(file_path=file_path_ll, poolsize=poolsize, dst_path=curr_dst_path, const=vname=="constants")
         print()
@@ -613,9 +620,9 @@ if __name__ == "__main__":
                     "-v argument invokes the conversion of the respective files from LatLon to HEALPix.")
     parser.add_argument("-v", "--variable-name", type=str, default="stream500",
                         help="The variable to be converted, for example '2m_temperature' or 'geopotential'.")
-    parser.add_argument("--latitudes", type=int, default=32)
-    parser.add_argument("--longitudes", type=int, default=64)
-    parser.add_argument("-n", "--nside", type=int, default=8,
+    parser.add_argument("--latitudes", type=int, default =180) # 32
+    parser.add_argument("--longitudes", type=int, default=360) #, #64)
+    parser.add_argument("-n", "--nside", type=int, default=64, #8,
                         help="The resolution of the faces of the HEALPix faces.")
     parser.add_argument("-r", "--resolution-factor", type=float, default=1.0,
                         help=("Can be required when the resolution of the original data is too coarse for the target "
@@ -624,6 +631,7 @@ if __name__ == "__main__":
                         help="The file format of the source and target data. Can be either 'zarr' or 'netcdf'.")
 
     run_args = parser.parse_args()
+
     project_ll_to_hpx(
         vname=run_args.variable_name,
         latitudes=run_args.latitudes,
