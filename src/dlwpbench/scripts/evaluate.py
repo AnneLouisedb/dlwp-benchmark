@@ -54,8 +54,8 @@ MODEL_NAME_PLOT_ARGS = {
     "gcast16m_p4_b1_d565_v2": {"c": "darkblue", "ls": "solid", "label": "GraphCast (16M)"},
 }
 def make_biweekly_inits(
-    start: str = "2017-01-01T00:00:00.000000000",
-    end: str = "2018-12-31T00:00:00.000000000",
+    start: str = "2022-01-01T00:00:00.000000000",
+    end: str = "2024-02-29T00:00:00.000000000",
     sequence_length: int = 15,
     timedelta: int = 1 
 ):
@@ -64,10 +64,10 @@ def make_biweekly_inits(
     end_date = pd.Timestamp(end, tz='UTC') - pd.Timedelta(hours=sequence_length*timedelta*24)
     
     # Generate date range for Mondays at 11:00 UTC
-    mondays = pd.date_range(start=start_date, end=end_date, freq='W-MON', tz='UTC') #.map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+    mondays = pd.date_range(start=start_date, end=end_date, freq='W-MON', tz='UTC') 
     
     # Generate date range for Thursdays at 11:00 UTC
-    thursdays = pd.date_range(start=start_date, end=end_date, freq='W-THU', tz='UTC')#.map(lambda x: x.replace(hour=11, minute=0, second=0, microsecond=0))
+    thursdays = pd.date_range(start=start_date, end=end_date, freq='W-THU', tz='UTC')
     
     # Combine Mondays and Thursdays
     all_dates = mondays.union(thursdays).sort_values()
@@ -76,9 +76,8 @@ def make_biweekly_inits(
 
     return naive_timestamp.to_numpy()
 
-def remap(cfg, data, name=None):
-    latitudes = 32
-    longitudes = 64
+def remap(cfg, data, latitudes = 180, longitudes = 360, name=None): # 32, 64
+    
     hpx_remapper = HEALPixRemap(
         latitudes=latitudes,
         longitudes=longitudes,
@@ -156,10 +155,9 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             sequence_length=cfg.testing.sequence_length,
             timedelta=cfg.data.timedelta
     )
-    #cfg.data.test_stop_date = "2017-10-16"
-    #dataset = #dataset_dict["hpx" if "hpx" in file_path else "cyl"]
+    
     if dataset == None:
-        if cfg.verbose: print("\nInitializing dataset")
+        print("\nInitializing dataset...")
         dataset = hydra.utils.instantiate(
             cfg.data,
             start_date=cfg.data.test_start_date,
@@ -167,16 +165,12 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             sequence_length= cfg.testing.sequence_length,
             init_dates=init_dates
         )
-        
-        #
-        #if "hpx" in file_path: dataset_dict["hpx"] = dataset
-        #else: dataset_dict["cyl"] = dataset
-    
+       
     dataloader1 = th.utils.data.DataLoader(
         dataset=dataset,
-        batch_size=32,# cfg.testing.batch_size,
+        batch_size=cfg.testing.batch_size,
         shuffle=False,
-        num_workers=0
+        num_workers= 16 # 0?
     )
     print("loaded dataset")
     print()
@@ -205,40 +199,78 @@ def evaluate_model(cfg: DictConfig, file_path: str, dataset: WeatherBenchDataset
             trained_betas=betas,
             prediction_type="v_prediction", # shouldnt this be "epsilon"
             clip_sample=False)
+        noise_scheduler.set_timesteps(cfg.model.num_refinement_step)
         
     # Evaluate (without gradients): iterate over all test samples
     with th.no_grad():
         inits = list()
         outputs = list()
         targets = list()
-        for constants, prescribed, prognostic, target in tqdm(dataloader1, desc="Generating forecasts"):
+        
+        print('length dataloader', len(dataloader1))
+        for constants, prescribed, prognostic, target in dataloader1:
+            batch_start_time = time.time()
+            split_size = max(1, prognostic.shape[0]//cfg.validation.gradient_accumulation_steps)
+            constants = constants.to(device=device).split(split_size) if not constants.isnan().any() else None
+            prescribed = prescribed.to(device=device).split(split_size) if not prescribed.isnan().any() else None
+            prognostic = prognostic.to(device=device).split(split_size)
+            target = target.to(device=device).split(split_size)
+            data_load_time = time.time() - batch_start_time
+            print('data load time', data_load_time)
+
+            inference_start_time = time.time()
+            for accum_idx in range(len(prognostic)):
+
+                if cfg.training.type == 'diffusion' or cfg.training.type == 'dyfusion':
+                    print("GOT HERE")
+                    
+
+                    output = model(
+                            constants=constants[accum_idx] if not constants == None else None,
+                            prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                            prognostic=prognostic[accum_idx],
+                            noise_scheduler = noise_scheduler, target = target[accum_idx])
+                
+                else:
+                    output = model(
+                        constants=constants[accum_idx] if not constants == None else None,
+                        prescribed=prescribed[accum_idx] if not prescribed == None else None,
+                        prognostic=prognostic[accum_idx]
+                    )
+                inference_time = time.time() - inference_start_time
+                print("inference time", inference_time)
+
+                outputs.append(output.cpu())
+                targets.append(target[accum_idx].cpu())
+
+        # for constants, prescribed, prognostic, target in tqdm(dataloader1, desc="Generating forecasts"):
                      
-            # Load data and generate predictions
-            constants = constants.to(device=device) if not constants.isnan().any() else None
-            prescribed = prescribed.to(device=device) if not prescribed.isnan().any() else None
-            prognostic = prognostic.to(device=device)
-            target = target.to(device=device)
+        #     # Load data and generate predictions
+        #     constants = constants.to(device=device) if not constants.isnan().any() else None
+        #     prescribed = prescribed.to(device=device) if not prescribed.isnan().any() else None
+        #     prognostic = prognostic.to(device=device)
+        #     target = target.to(device=device)
 
-            if cfg.training.type == 'diffusion' or cfg.training.type == 'dyfusion':
-                print("GOT HERE")
-                output = model(
-                    constants=constants if not constants == None else None,
-                    prescribed=prescribed if not prescribed == None else None,
-                    prognostic=prognostic,
-                    noise_scheduler = noise_scheduler,
-                    target = target)
-            else:
-                print("normal model?")
+        #     if cfg.training.type == 'diffusion' or cfg.training.type == 'dyfusion':
+        #         print("GOT HERE")
+        #         output = model(
+        #             constants=constants if not constants == None else None,
+        #             prescribed=prescribed if not prescribed == None else None,
+        #             prognostic=prognostic,
+        #             noise_scheduler = noise_scheduler,
+        #             target = target)
+            # else:
+            #     print("normal model?")
 
-                output = model(
-                    constants=constants if not constants == None else None,
-                    prescribed=prescribed if not prescribed == None else None,
-                    prognostic=prognostic
-                )
-            inits.append(prognostic[:, 0].cpu())
-            outputs.append(output.cpu())
-            targets.append(target.cpu())
-            # remove
+            #     output = model(
+            #         constants=constants if not constants == None else None,
+            #         prescribed=prescribed if not prescribed == None else None,
+            #         prognostic=prognostic
+            #     )
+            # inits.append(prognostic[:, 0].cpu())
+            # outputs.append(output.cpu())
+            # targets.append(target.cpu())
+            # # remove
             
            
         inits = th.cat(inits).numpy()
@@ -309,7 +341,7 @@ def build_dataset(
 
     # Determine data dimensions and set resolution in degree
     B, T, D, H, W = outputs.shape
-    deg = 5.625
+    deg = 1.0 #5.625
 
     dt = f"{cfg.data.timedelta*24}h"
     timedeltas = pd.timedelta_range(start=dt, periods=T, freq=dt)
@@ -318,7 +350,7 @@ def build_dataset(
     coords = {}
     coords["sample"] = init_dates
     coords["time"] = timedeltas
-    coords["lat"] = np.array(np.arange(start=(-90+(5.625/2)), stop=90, step=deg), dtype=np.float32)
+    coords["lat"] = np.array(np.arange(start=-90, stop=90, step=deg), dtype=np.float32) # +(deg/2)
     coords["lon"] = np.array(np.arange(start=0, stop=360, step=deg), dtype=np.float32)
     chunkdict = {coord: len(coords[coord]) for coord in coords}
     chunkdict["sample"] = 1
@@ -342,7 +374,7 @@ def build_dataset(
                 v_idx += 1
         else:
             vname = p
-            #if vname not in ["t2m", "u10"]: v_idx+=1; continue
+            
             attrs = statistics[p]
             inits_dict[vname] = xr.DataArray(data=inits[:, v_idx], dims=["sample", "lat", "lon"], attrs=attrs)
             outputs_dict[vname] = xr.DataArray(data=outputs[:, :, v_idx], dims=["sample", "time", "lat", "lon"], attrs=attrs)
@@ -514,6 +546,10 @@ def plot_acc_over_time(
 
     
 def plot_relative_improvement(cfg, performance_dict, file_path_comparison, plot_title='RMSE of Models vs. EC46', with_climatology = False):
+    """This validation is done in 5.625 degrees!
+    1. needs climatology
+    2. Needs EC46 
+    """
 
     color_dict = {
             'model1': 'blue',
@@ -524,7 +560,7 @@ def plot_relative_improvement(cfg, performance_dict, file_path_comparison, plot_
     colors =  list(color_dict.values())
 
     months = [1,2,3,4,5,6,7,8,9,10,11,12] 
-    years = [2017]
+    years = [2022]
     rmse_ec46 = None
     rmse_clim = None
 
@@ -605,6 +641,7 @@ def plot_relative_improvement(cfg, performance_dict, file_path_comparison, plot_
 
 
 def plot_skill_per_day(cfg,performance_dict,file_path_comparison,plot_title, climatology = False): 
+    """This validation is done in 5.625 degrees!"""
     color_dict = {
             'model1': 'blue',
             'model2': 'orange',
@@ -613,7 +650,7 @@ def plot_skill_per_day(cfg,performance_dict,file_path_comparison,plot_title, cli
     colors =  list(color_dict.values())
 
     months = [1,2,3,4,5,6,7,8,9,10,11,12] 
-    years = [2017]
+    years = [2022]
 
     caption = f"Tested on biweekly values in months: {str(months)}; year: {str(years)}"
 
@@ -733,7 +770,7 @@ def compute_metrics(
     ds_outputs: xr.Dataset,
     ds_targets: xr.Dataset,
     file_path: str,
-    overide: bool = False
+    overide: bool = False,
 ) -> None:
     """
     Compute RMSE and Frobenius Norm (accumulated error) and print them to console.
@@ -744,7 +781,7 @@ def compute_metrics(
     :param file_path: The destination path where to write results
     """
 
-    print("\nChecking whether to compute metrics for", cfg.model.name, "model")
+    print("\nChecking whether to compute metrics for", cfg.model.name, "model", 'width:', cfg.data.width)
 
     T = ds_outputs.sizes["time"]  # Number of time steps
 
@@ -838,120 +875,120 @@ def compute_metrics(
 
     ## Model compared to EC46
     
-    ec46_folder = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/EC46/msl'
-    months = [1,2,3,4,5,6,7,8,9,10,11,12] 
-    years = [2017]
+    # ec46_folder = '/home/adboer/dlwp-benchmark/src/dlwpbench/data/netcdf/EC46/msl'
+    # months = [1,2,3,4,5,6,7,8,9,10,11,12] 
+    # years = [2017]
     
-    for year in years:
-        for month in months:
-            file_path_comparison = os.path.join(file_path, f"comparison_with_ec46_{str(month)}-{str(year)}.nc")
-            ec46_file = os.path.join(ec46_folder, f"{month}-{year}.nc")
+    # for year in years:
+    #     for month in months:
+    #         file_path_comparison = os.path.join(file_path, f"comparison_with_ec46_{str(month)}-{str(year)}.nc")
+    #         ec46_file = os.path.join(ec46_folder, f"{month}-{year}.nc")
 
-            if not os.path.exists(file_path_comparison) or overide:
-                print("\tComputing comparison (MSL only!) with EC46 for October 2017...")
+    #         if not os.path.exists(file_path_comparison) or overide:
+    #             print("\tComputing comparison (MSL only!) with EC46 for October 2017...")
                 
-                # Load EC46 data
-                ds_ec46 = xr.open_dataset(ec46_file)
+    #             # Load EC46 data
+    #             ds_ec46 = xr.open_dataset(ec46_file)
                 
-                # Select October 2017 from your model outputs and targets
-                ds_outputs_oct2017 = ds_outputs.sel(sample=((ds_outputs.sample.dt.year == year) & (ds_outputs.sample.dt.month == month)))
-                ds_targets_oct2017 = ds_targets.sel(sample=((ds_targets.sample.dt.year == year) & (ds_targets.sample.dt.month == month)))
+    #             # Select October 2017 from your model outputs and targets
+    #             ds_outputs_oct2017 = ds_outputs.sel(sample=((ds_outputs.sample.dt.year == year) & (ds_outputs.sample.dt.month == month)))
+    #             ds_targets_oct2017 = ds_targets.sel(sample=((ds_targets.sample.dt.year == year) & (ds_targets.sample.dt.month == month)))
                 
-                # Ensure all datasets have the same coordinates
-                ds_ec46 = ds_ec46.reindex_like(ds_outputs_oct2017)
+    #             # Ensure all datasets have the same coordinates
+    #             ds_ec46 = ds_ec46.reindex_like(ds_outputs_oct2017)
                 
-                # Compute RMSE between your model and targets
-                rmse_model = np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             # Compute RMSE between your model and targets
+    #             rmse_model = np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
                 
-                # Compute RMSE between EC46 and targets
-                rmse_ec46 = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             # Compute RMSE between EC46 and targets
+    #             rmse_ec46 = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
 
-                diff = np.sqrt(((ds_ec46 - ds_outputs_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             diff = np.sqrt(((ds_ec46 - ds_outputs_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
 
-                # Compute relative improvement
-                relative_improvement = (rmse_ec46 - rmse_model) / rmse_ec46 * 100
+    #             # Compute relative improvement
+    #             relative_improvement = (rmse_ec46 - rmse_model) / rmse_ec46 * 100
 
-                # Compute RMSE between EC46 and targets
-                # Compute RMSE between your model and targets
+    #             # Compute RMSE between EC46 and targets
+    #             # Compute RMSE between your model and targets
 
-                rmse_model_raw= np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
-                rmse_ec46_raw = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+    #             rmse_model_raw= np.sqrt(((ds_outputs_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+    #             rmse_ec46_raw = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
                 
-                # Compute relative improvement
-                relative_improvement_raw = (rmse_ec46_raw - rmse_model_raw) / rmse_ec46_raw * 100
+    #             # Compute relative improvement
+    #             relative_improvement_raw = (rmse_ec46_raw - rmse_model_raw) / rmse_ec46_raw * 100
             
-                # Create a dataset with the comparison results
-                ds_comparison = xr.Dataset({
-                    "rmse_model": rmse_model, 
-                    "rmse_ec46": rmse_ec46.to_dataarray(), 
-                    "relative_improvement": relative_improvement.to_dataarray(), 
-                    'difference_model_ec': diff.to_dataarray(),
-                    'relative_per_day': relative_improvement_raw.to_dataarray(),
-                })
+    #             # Create a dataset with the comparison results
+    #             ds_comparison = xr.Dataset({
+    #                 "rmse_model": rmse_model, 
+    #                 "rmse_ec46": rmse_ec46.to_dataarray(), 
+    #                 "relative_improvement": relative_improvement.to_dataarray(), 
+    #                 'difference_model_ec': diff.to_dataarray(),
+    #                 'relative_per_day': relative_improvement_raw.to_dataarray(),
+    #             })
 
-                # Save the comparison results
-                ds_comparison.to_netcdf(file_path_comparison)
+    #             # Save the comparison results
+    #             ds_comparison.to_netcdf(file_path_comparison)
                 
-                print(f"\tComparison results saved to {file_path_comparison}")
-                # Assuming your DataArray is named `skill_score`
+    #             print(f"\tComparison results saved to {file_path_comparison}")
+    #             # Assuming your DataArray is named `skill_score`
 
-                file_path_ = os.path.join(file_path, "accs_climatology.nc")
+    #             file_path_ = os.path.join(file_path, "accs_climatology.nc")
 
 
-            file_path_comparison = os.path.join(file_path, f"climatology_comparison_with_ec46_{str(month)}-{str(year)}.nc")
-            # Inside the loop where you're processing EC46 data
-            if os.path.exists(path_to_climatology) and (not os.path.exists(file_path_comparison) or overide):
-                print("\tComputing RMSE for EC46 vs climatology...")
-                # climatology vs. ec46
+    #         file_path_comparison = os.path.join(file_path, f"climatology_comparison_with_ec46_{str(month)}-{str(year)}.nc")
+    #         # Inside the loop where you're processing EC46 data
+    #         if os.path.exists(path_to_climatology) and (not os.path.exists(file_path_comparison) or overide):
+    #             print("\tComputing RMSE for EC46 vs climatology...")
+    #             # climatology vs. ec46
                 
-                ds_climatology = xr.open_dataset(path_to_climatology)
-                # Load EC46 data
-                ds_ec46 = xr.open_dataset(ec46_file)
+    #             ds_climatology = xr.open_dataset(path_to_climatology)
+    #             # Load EC46 data
+    #             ds_ec46 = xr.open_dataset(ec46_file)
                 
                 
-                # Select October 2017 from your model outputs and targets
-                ds_climatology_oct2017 = ds_climatology.sel(sample=((ds_climatology.sample.dt.year == year) & (ds_climatology.sample.dt.month == month)))
-                ds_targets_oct2017 = ds_targets.sel(sample=((ds_targets.sample.dt.year == year) & (ds_targets.sample.dt.month == month)))
+    #             # Select October 2017 from your model outputs and targets
+    #             ds_climatology_oct2017 = ds_climatology.sel(sample=((ds_climatology.sample.dt.year == year) & (ds_climatology.sample.dt.month == month)))
+    #             ds_targets_oct2017 = ds_targets.sel(sample=((ds_targets.sample.dt.year == year) & (ds_targets.sample.dt.month == month)))
                 
-                # Ensure all datasets have the same coordinates
-                ds_ec46 = ds_ec46.reindex_like(ds_climatology_oct2017)
+    #             # Ensure all datasets have the same coordinates
+    #             ds_ec46 = ds_ec46.reindex_like(ds_climatology_oct2017)
                 
-                # Compute RMSE between your model and targets
-                rmse_climatology = np.sqrt(((ds_climatology_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             # Compute RMSE between your model and targets
+    #             rmse_climatology = np.sqrt(((ds_climatology_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
                 
-                # Compute RMSE between EC46 and targets
-                rmse_ec46 = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             # Compute RMSE between EC46 and targets
+    #             rmse_ec46 = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
 
-                diff = np.sqrt(((ds_ec46 - ds_climatology_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
+    #             diff = np.sqrt(((ds_ec46 - ds_climatology_oct2017.msl)**2).mean(dim=["time", "lat", "lon"]))
 
-                # Compute relative improvement
-                relative_improvement = (rmse_ec46 - rmse_climatology) / rmse_ec46 * 100
+    #             # Compute relative improvement
+    #             relative_improvement = (rmse_ec46 - rmse_climatology) / rmse_ec46 * 100
 
-                # Compute RMSE between EC46 and targets
-                # Compute RMSE between your model and targets
+    #             # Compute RMSE between EC46 and targets
+    #             # Compute RMSE between your model and targets
 
-                rmse_climatology_raw= np.sqrt(((ds_climatology_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
-                rmse_ec46_raw = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+    #             rmse_climatology_raw= np.sqrt(((ds_climatology_oct2017.msl - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
+    #             rmse_ec46_raw = np.sqrt(((ds_ec46 - ds_targets_oct2017.msl)**2).mean(dim=["lat", "lon"]))
                 
-                # Compute relative improvement
-                relative_improvement_raw = (rmse_ec46_raw - rmse_climatology_raw) / rmse_ec46_raw * 100
+    #             # Compute relative improvement
+    #             relative_improvement_raw = (rmse_ec46_raw - rmse_climatology_raw) / rmse_ec46_raw * 100
             
-                # Create a dataset with the comparison results
-                ds_comparison = xr.Dataset({
-                    "rmse_climatology": rmse_climatology, 
-                    "rmse_ec46": rmse_ec46.to_dataarray(), 
-                    "relative_improvement": relative_improvement.to_dataarray(), 
-                    'difference_model_ec': diff.to_dataarray(),
-                    'relative_per_day': relative_improvement_raw.to_dataarray()
-                })
+    #             # Create a dataset with the comparison results
+    #             ds_comparison = xr.Dataset({
+    #                 "rmse_climatology": rmse_climatology, 
+    #                 "rmse_ec46": rmse_ec46.to_dataarray(), 
+    #                 "relative_improvement": relative_improvement.to_dataarray(), 
+    #                 'difference_model_ec': diff.to_dataarray(),
+    #                 'relative_per_day': relative_improvement_raw.to_dataarray()
+    #             })
 
-                # Save the comparison results
-                ds_comparison.to_netcdf(file_path_comparison)
+    #             # Save the comparison results
+    #             ds_comparison.to_netcdf(file_path_comparison)
                 
-                print(f"\tComparison results saved to {file_path_comparison}")
-                # Assuming your DataArray is named `skill_score`
+    #             print(f"\tComparison results saved to {file_path_comparison}")
+    #             # Assuming your DataArray is named `skill_score`
 
-                file_path_ = os.path.join(file_path, "accs_climatology.nc")
+    #             file_path_ = os.path.join(file_path, "accs_climatology.nc")
 
                         
 
@@ -1011,6 +1048,7 @@ def run_evaluations(
         if not os.path.exists(os.path.join(file_path, output_fname)) or overide:
             os.makedirs(file_path, exist_ok=True)
             dataset = dataset_hpx if "hpx" in file_path else dataset_cyl
+            # this function returns the remapped outputs - lat-lon representation
             dataset = evaluate_model(cfg=cfg, file_path=file_path, dataset=dataset, complevel=complevel)
             if "hpx" in file_path: dataset_hpx = dataset
             else: dataset_cyl = dataset
@@ -1048,18 +1086,18 @@ def run_evaluations(
     print("(5) Plotting RMSE and ACC")
     #if overide: plot_rmse_over_time(cfg-cfg, performance_dict=performance_dict)
     plot_rmse_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title, with_climatology=True)
-    plot_acc_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
+    #plot_acc_over_time(cfg=cfg, performance_dict=performance_dict, plot_title=plot_title)
     #RMSE over EC period
-    plot_relative_improvement(cfg,performance_dict,"comparison_with_ec46_october2017.nc",plot_title,with_climatology=True )
+   # plot_relative_improvement(cfg,performance_dict,"comparison_with_ec46_october2017.nc",plot_title,with_climatology=True )
 
-    plot_skill_per_day(cfg, performance_dict,"comparison_with_ec46_october2017.nc",plot_title)
-    plot_skill_per_day(cfg, performance_dict,"comparison_with_ec46_october2017.nc",plot_title,climatology=True)
+   # plot_skill_per_day(cfg, performance_dict,"comparison_with_ec46_october2017.nc",plot_title)
+   # plot_skill_per_day(cfg, performance_dict,"comparison_with_ec46_october2017.nc",plot_title,climatology=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate a model with a given configuration. Particular properties of the configuration can be "
                     "overwritten, as listed by the -h flag.")
-    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/DMUS_0.2noise', 'outputs/DMUS_0.2noise_againC1', 'outputs/DMUS_0.2noise_againC1150'],# 'outputs/LongContext',  'outputs/MUunet_inverted_C2_hpx88','outputs/DiffMUNetHPX_smallest_98R', 'outputs/DiffMUNetHPX_test', 'outputs/unet_inverted_C2_hpx'], #'outputs/speccheckCHECK2INV0.7', 'outputs/modernunet_inverted'],#  ], # #, , 'outputs/modunet_inverted_32B_COMP_check'], #, , ,'outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
+    parser.add_argument("-c", "--configuration-dir-list", nargs="*", default=['outputs/C1_diffusion_halfdata'],# 'outputs/LongContext',  'outputs/MUunet_inverted_C2_hpx88','outputs/DiffMUNetHPX_smallest_98R', 'outputs/DiffMUNetHPX_test', 'outputs/unet_inverted_C2_hpx'], #'outputs/speccheckCHECK2INV0.7', 'outputs/modernunet_inverted'],#  ], # #, , 'outputs/modunet_inverted_32B_COMP_check'], #, , ,'outputs/unet_inverted'], # 'outputs/MUnet_w_diff', 'outputs/MUnet_w_diff_SpectralLoss', 'outputs/MUnet_w_diff_ADJ', 'outputs/MUnet_w_diff_ADJ_50'], # modernunet_inverted'], #swintransformer'], #unet'], #=["configs"], 'outputs/panguweather', 'outputs/unet_inverted', 'outputs/unet', 'outputs/swintransformer',
                         help="List of directories where the configuration files of all models to be evaluated lie.")
     parser.add_argument("-d", "--device", type=str, default="cpu",
                         help="The device to run the evaluation. Any of ['cpu' (default), 'cuda:0', 'mpg'].")
