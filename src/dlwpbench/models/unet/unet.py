@@ -3,9 +3,10 @@
 
 import torch as th
 import einops
+from hydra.utils import instantiate
 from utils import CylinderPad
 from utils import HEALPixLayer,HEALPixPadding
-
+from typing import Any, Dict, Optional, Sequence, Union
 # File contains both a standard unet and modern unet with wide residual blocks
 
 
@@ -27,6 +28,7 @@ class ModernUNet(th.nn.Module):
         mesh: str = "equirectangular",
         attention: bool = False,
         norm: bool = False, # groupnorm in each residual block?
+        recurrent:bool = False,
         **kwargs
     ):
         super(ModernUNet, self).__init__()
@@ -49,7 +51,8 @@ class ModernUNet(th.nn.Module):
             #attention = attention,
             norm = norm,
             activation=activation,
-            mesh=mesh
+            mesh=mesh,
+           
             )
       
 
@@ -57,8 +60,15 @@ class ModernUNet(th.nn.Module):
             hidden_channels=hidden_channels,
             out_channels=prognostic_channels,
             activation=activation,
-            mesh=mesh
+            mesh=mesh,
+            recurrent=recurrent
         )
+
+    def detach_hidden(self):
+        if self.decoder.lstm_block.h is not None:
+            self.decoder.lstm_block.h = self.decoder.lstm_block.h.detach()
+        if self.decoder.lstm_block.c is not None:
+            self.decoder.lstm_block.c = self.decoder.lstm_block.c.detach()
 
     def _prepare_inputs(
         self,
@@ -145,6 +155,7 @@ class MUNetHPX(ModernUNet):
         mesh: str = "healpix",
         attention: bool = False,
         norm: bool = False, # groupnorm in each residual block?
+        recurrent: bool = False,
         **kwargs
     ):
         super(MUNetHPX, self).__init__(
@@ -157,6 +168,7 @@ class MUNetHPX(ModernUNet):
             mesh="healpix",
             attention = attention,
             norm=norm,
+            recurrent=recurrent,
             kwargs=kwargs
         )
     
@@ -179,6 +191,8 @@ class MUNetHPX(ModernUNet):
                 tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
  
         return th.cat(tensors, dim=1)
+    
+    
             
             
 class UNet(th.nn.Module):
@@ -196,7 +210,6 @@ class UNet(th.nn.Module):
         activation: th.nn.Module = th.nn.GELU(),
         context_size: int = 1,
         mesh: str = "equirectangular",
-        
         **kwargs
     ):
         super(UNet, self).__init__()
@@ -204,7 +217,7 @@ class UNet(th.nn.Module):
 
         self.context_size = context_size
         self.mesh = mesh
-        
+       
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
         
         self.encoder = UNetEncoder(
@@ -318,6 +331,7 @@ class UNetHPX(UNet):
             context_size=context_size,
             mesh=mesh,
             kwargs=kwargs
+           
         )
     
     def _prepare_inputs(
@@ -539,13 +553,16 @@ class ModernUNetDecoder(th.nn.Module):
         out_channels: int = 2,
         activation: th.nn.Module = th.nn.GELU(),
         attention: bool = False,
-        mesh: str = "equirectangular"
+        mesh: str = "equirectangular",
+        recurrent: bool = False
     ):
         super(ModernUNetDecoder, self).__init__()
         self.layers = []
         hidden_channels = hidden_channels[::-1]  # Invert as we go up in decoder, i.e., from bottom to top layers
         self.attn = th.nn.Identity() # attention is not yet implemented
         self.activation = activation
+        self.recurrent = recurrent
+
         
 
         for c_idx in range(len(hidden_channels)):
@@ -573,6 +590,17 @@ class ModernUNetDecoder(th.nn.Module):
                     mesh = mesh
                 ))
                 layer.append(self.attn)
+
+            if self.recurrent:
+                self.lstm_block = ConvNeXtLSTMBlock(
+                    geometry_layer=HEALPixLayer if mesh == "healpix" else th.nn.Identity,
+                    in_channels=c_out,
+                    h_channels=c_out,
+                    kernel_size=7,
+                    activation=activation,
+                    enable_healpixpad=(mesh == "healpix"))
+                
+                layer.append(self.lstm_block)
 
                 
             # Apply upsampling if not in top-most layer
@@ -662,6 +690,7 @@ class ResidualBlock(th.nn.Module):
 
         else:
             self.cylinder_pad = CylinderPad(padding=padding)
+
         self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=0) 
         self.conv2 = zero_module(th.nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, padding=0)) 
         # If the number of input channels is not equal to the number of output channels we have to
@@ -738,6 +767,125 @@ class MiddleBlock(th.nn.Module):
         x = self.attn(x)
         x = self.res2(x)
         return x
+
+
+
+
+
+class ConvNeXtLSTMBlock(th.nn.Module):
+    def __init__(
+            self,
+            geometry_layer: th.nn.Module = HEALPixLayer,
+            in_channels: int = 1,
+            h_channels: int = 1,
+            kernel_size: int = 7,
+            dilation: int = 1,
+            activation: th.nn.Module = None,
+            dropout: float = 0.,
+            enable_nhwc: bool = False,
+            enable_healpixpad: bool = False):
+        '''
+        :param x_channels: Input channels
+        :param h_channels: Latent state channels
+        :param kernel_size: Convolution kernel size
+        :param activation_fn: Output activation function
+        '''
+        super().__init__()
+        h_channels = in_channels
+        conv_channels = in_channels + h_channels
+        #spatial mixing
+        self.to_latent = th.nn.Sequential(
+            geometry_layer(
+                layer="torch.nn.Conv2d",
+                in_channels=conv_channels,
+                out_channels=in_channels,
+                kernel_size=kernel_size,
+                dilation=dilation,
+                padding="same",
+                groups=in_channels,
+                #enable_nhwc=enable_nhwc,
+                #enable_healpixpad=enable_healpixpad
+                ),
+            geometry_layer(
+                layer="torch.nn.GroupNorm",
+                num_channels=in_channels,
+                num_groups=1,
+                affine=True,
+                #enable_nhwc=enable_nhwc,
+                #enable_healpixpad=enable_healpixpad
+                ),
+            geometry_layer(
+                layer="torch.nn.Conv2d",
+                in_channels=in_channels,
+                out_channels=4*in_channels,
+                kernel_size=1,
+                #enable_nhwc=enable_nhwc,
+                #enable_healpixpad=enable_healpixpad
+                ),
+            geometry_layer(
+                layer="torch.nn.GroupNorm",
+                num_channels=4*in_channels,
+                num_groups=4, 
+                affine=True,
+                #enable_nhwc=enable_nhwc,
+                #enable_healpixpad=enable_healpixpad
+                )
+        )
+        #output activation
+        self.to_output = th.nn.Sequential(
+            geometry_layer(
+                layer="torch.nn.Conv2d",
+                in_channels=h_channels,
+                out_channels=h_channels,
+                kernel_size=1,
+                #enable_nhwc=enable_nhwc,
+                #enable_healpixpad=enable_healpixpad
+                ),
+            geometry_layer(
+                layer="torch.nn.GroupNorm",
+                num_channels=h_channels,
+                num_groups=1, 
+                affine=True,
+                #enable_nhwc=enable_nhwc,
+               #enable_healpixpad=enable_healpixpad
+                ),
+            
+            th.nn.GELU()
+        )
+        #dropout
+        self.dropout = th.nn.Dropout(dropout)
+
+        # Latent states
+        self.h = th.zeros(1)
+        self.c = th.zeros(1)
+
+    
+    def forward(self, inputs: Sequence) -> Sequence:
+        '''
+        LSTM forward pass
+        :param inputs: Input
+        '''
+        if inputs.shape != self.h.shape:
+            self.h = th.zeros_like(inputs)
+            self.c = th.zeros_like(inputs)
+
+        # Spatial mixing
+        z = th.cat((inputs, self.h), dim = 1) if inputs is not None else self.h
+        z = self.to_latent(z)
+        # LSTM activation
+        f, i, g, o = einops.rearrange(z, 'b (gates c) h w -> gates b c h w', gates = 4) #forget gate, input gate, g, output gate
+        cell = th.sigmoid(f) * self.c + th.sigmoid(i) * self.dropout(th.tanh(g))
+        hidden = th.sigmoid(o) * self.to_output(self.c)
+        
+        self.h = hidden
+        self.c = cell
+
+
+        return hidden
+
+    def reset(self):
+        self.h = th.zeros_like(self.h)
+        self.c = th.zeros_like(self.c)
 
 
 
