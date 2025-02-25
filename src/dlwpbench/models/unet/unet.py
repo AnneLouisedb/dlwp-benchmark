@@ -7,6 +7,7 @@ from hydra.utils import instantiate
 from utils import CylinderPad
 from utils import HEALPixLayer,HEALPixPadding
 from typing import Any, Dict, Optional, Sequence, Union
+from models.convlstm.convlstm import ConvLSTMCell
 # File contains both a standard unet and modern unet with wide residual blocks
 
 
@@ -36,6 +37,7 @@ class ModernUNet(th.nn.Module):
 
         self.context_size = context_size
         self.mesh = mesh
+        self.recurrent = recurrent
        
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size
         
@@ -63,12 +65,6 @@ class ModernUNet(th.nn.Module):
             mesh=mesh,
             recurrent=recurrent
         )
-
-    def detach_hidden(self):
-        if self.decoder.lstm_block.h is not None:
-            self.decoder.lstm_block.h = self.decoder.lstm_block.h.detach()
-        if self.decoder.lstm_block.c is not None:
-            self.decoder.lstm_block.c = self.decoder.lstm_block.c.detach()
 
     def _prepare_inputs(
         self,
@@ -100,6 +96,10 @@ class ModernUNet(th.nn.Module):
         # prognostic: [B, T, C, (F), H, W]
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
+        #if self.recurrent:
+        #    print('reset lstm block?')
+        #    self.decoder.lstm_block.reset()
+
         for t in range(self.context_size, prognostic.shape[1]):
             # For each t I want to store the loss in an array, and see how the prediction skill decreases over time
           
@@ -570,6 +570,13 @@ class ModernUNetDecoder(th.nn.Module):
             c_in = hidden_channels[c_idx]
             c_out = hidden_channels[c_idx]
 
+            # # Determine the height and width for this layer
+            if c_idx == 0:
+                height_x, width_x = 8, 8
+            elif c_idx == 1:
+                height_x, width_x = 4, 4
+            else:
+                height_x, width_x = 2, 2
             
             c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
             if mesh == "equirectangular":
@@ -592,13 +599,26 @@ class ModernUNetDecoder(th.nn.Module):
                 layer.append(self.attn)
 
             if self.recurrent:
-                self.lstm_block = ConvNeXtLSTMBlock(
-                    geometry_layer=HEALPixLayer if mesh == "healpix" else th.nn.Identity,
-                    in_channels=c_out,
-                    h_channels=c_out,
-                    kernel_size=7,
-                    activation=activation,
-                    enable_healpixpad=(mesh == "healpix"))
+                self.lstm_block = ConvLSTMCell(
+                batch_size=32*12,
+                input_size=c_out,
+                hidden_size=c_out,
+                height=2, #height_x,
+                width=2, #width_x,
+                device='cuda:0',
+                bias=True,
+                mesh='healpix'
+                )
+
+                # clstm.append(
+                # self.lstm_block = ConvNeXtLSTMBlock(
+                #     geometry_layer=HEALPixLayer if mesh == "healpix" else th.nn.Identity,
+                #     in_channels=c_out,
+                #     h_channels=c_out,
+                #     kernel_size=7,
+                #     activation=activation,
+                #     enable_healpixpad=(mesh == "healpix"))
+
                 
                 layer.append(self.lstm_block)
 

@@ -4,6 +4,7 @@ from utils import CylinderPad
 from utils import HEALPixPadding,ConditionalHEALPixLayer
 from abc import ABC, abstractmethod
 import math 
+from torch.cuda.amp import autocast
 
 
 def fourier_embedding(timesteps: th.Tensor, dim, max_period=10000):
@@ -89,7 +90,6 @@ class DiffModernUNet(DiffusionModel):
         )
          
         in_channels = constant_channels + (prescribed_channels+prognostic_channels)*context_size + (prognostic_channels*context_size)
-        print('in channels expected?', in_channels)
         
         self.encoder = ModernUNetEncoder(
             in_channels=in_channels,
@@ -182,9 +182,10 @@ class DiffModernUNet(DiffusionModel):
             target_shape = (b * f, t, c, h, w)
             
         y_noised = th.randn(target_shape).to(device=prognostic[0].device)
-
-
+        print("noise scheduler?")
+        print(noise_scheduler.timesteps)
         for k in noise_scheduler.timesteps:
+            print(k)
                        
             # Create a 1D tensor of length batch_size, filled with k
             k_tensor = th.full(
@@ -225,13 +226,16 @@ class DiffModernUNet(DiffusionModel):
         # prognostic: [B, T, C, (F), H, W]
        
         prescribed_input = prescribed
-        
+        print("inside diffustion forward?")
+        print(self.context_size)
+        print(prognostic.shape[1])
 
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
         
         for t in range(self.context_size, prognostic.shape[1] ): # half the time stamps right?? //2
         # [C, C, T1, T2, T3] -> prognostic time dimension
+            print("forecasting day ..", t)
             
             t_start = max(0, t-(self.context_size))
             
@@ -254,16 +258,12 @@ class DiffModernUNet(DiffusionModel):
                 prescribed = prescribed_input[:, t-self.context_size:t] if prescribed_input is not None else None
                 
             target = prognostic[:, t].unsqueeze(1)
-            
+            print("to diffusion forward?")
             out = self.diffusion_forward(constants, prescribed, prognostic_t, noise_scheduler, target.shape)
-
+            print("done with diffusion forward?")
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
 
-            print(out)
-
             out = prognostic_t[:, -1] + out # since we are training to predict the residual!!
-
-            print("OUT", out.shape)
                  
             outs.append(out)
 
@@ -399,10 +399,11 @@ class ModernUNetEncoder(th.nn.Module):
             for module in layer:
                 if isinstance(module, ConditionedBlock):
                     x = module(x, emb)
-                elif isinstance(module, ConditionalHEALPixLayer): # REMOVE
+                elif isinstance(module, ConditionalHEALPixLayer): 
                     x = module(x, emb)
                 else:
                     try:
+                        
                         x = module(x)
                     except:
                         x = module(x, emb)
@@ -570,7 +571,7 @@ class AttentionBlock(th.nn.Module):
         res = th.einsum("bijh,bjhd->bihd", attn, v)
 
         # Reshape to `[batch_size, seq, n_heads * d_k]`
-        res = res.view(batch_size, -1, self.n_heads * self.d_k)
+        res = res.reshape(batch_size, -1, self.n_heads * self.d_k)
 
         # Transform to `[batch_size, seq, n_channels]`
         res = self.output(res)
@@ -582,8 +583,7 @@ class AttentionBlock(th.nn.Module):
         res = res.permute(0, 2, 1).view(batch_size, n_channels, height, width)
 
         return res
-
-
+    
 
 
 class ResidualBlock(ConditionedBlock):
@@ -648,29 +648,29 @@ class ResidualBlock(ConditionedBlock):
 
     def forward(self, x: th.Tensor, emb: th.Tensor):
         # First convolution layer
-        
-        h = self.activation(self.norm1(x))
-        h = self.cylinder_pad(h)
-        h = self.conv1(h)
+        with autocast():
+            h = self.activation(self.norm1(x))
+            h = self.cylinder_pad(h) # HERE IS THE ISSUE - parallelize?
+            h = self.conv1(h)
 
-        emb_out = self.cond_emb(emb)
-        while len(emb_out.shape) < len(h.shape):
-            emb_out = emb_out[..., None]
+            emb_out = self.cond_emb(emb)
+            while len(emb_out.shape) < len(h.shape):
+                emb_out = emb_out[..., None]
 
-        if self.use_scale_shift_norm:
-            scale, shift = th.chunk(emb_out, 2, dim=1)
-            h = self.norm2(h) * (1 + scale) + shift  # where we do -1 or +1 doesn't matter
+            if self.use_scale_shift_norm:
             
-            h = self.activation(h)
-            h = self.cylinder_pad(h)
-            h = self.conv2(h)
-        else:
-            h = h + emb_out
-            h = self.activation(self.norm2(h))
-            h = self.cylinder_pad(h)
-            h = self.conv2(h)
-            # Add the shortcut connection and return
-            
+                    scale, shift = th.chunk(emb_out, 2, dim=1)
+                    h = self.norm2(h) * (1 + scale) + shift  # where we do -1 or +1 doesn't matter
+                    h = self.activation(h)
+                    h = self.cylinder_pad(h)
+                    h = self.conv2(h)
+            else:
+                h = h + emb_out
+                h = self.activation(self.norm2(h))
+                h = self.cylinder_pad(h)
+                h = self.conv2(h)
+                # Add the shortcut connection and return
+                
         return h + self.shortcut(x)
 
 
