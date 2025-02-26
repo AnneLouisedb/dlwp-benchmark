@@ -1,0 +1,33 @@
+_target_: data.datasets.WeatherBenchDataset
+type: WeatherBenchDataset
+data_path: data/zarr/ERA5_2.0_hpx32/
+engine: zarr
+train_start_date: 1940-01-01
+train_stop_date: 2020-12-31
+val_start_date: 2021-01-01 
+val_stop_date: 2021-12-31
+test_start_date: 2022-01-01
+test_stop_date: 2024-02-29
+timedelta: 1 #Days between input steps
+init_dates: null
+normalize: true
+num_workers: 6 #2
+drop_last: true
+height: 90
+width: 180
+degree: 2.0
+sequence_length: None  # Overridden by training/validation/testing config
+downscale_factor: 1
+context_size: ${model.context_size}
+constant_names: 
+  - orography
+  - lsm   # land-sea mask
+  - lat2d
+  - lon2d
+prescribed_variable_names:
+  - tisr  # top of atmosphere incoming solar radiation
+prognostic_variable_names_and_levels:
+  msl: []
+  stream250: []
+  stream500: [] 
+  
