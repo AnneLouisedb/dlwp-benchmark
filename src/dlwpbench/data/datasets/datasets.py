@@ -181,13 +181,79 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         
         half_manual_32 = {"tisr": 
             {"file_name": "toa_incident_solar_radiation",
-            "mean": 0.2508859210090885,
-            "std": 0.32323661025652123},
+            "mean": 0.2508913626665014,
+            "std": 0.3232416586372475},
 
             "lsm": 
             {"file_name": "lsm", # do not normalize the constant
             "mean": 0,
             "std": 1},
+
+            # TO DO !
+            "geopotential-50": 
+            {"file_name": "geopotential-50",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-100": 
+            {"file_name": "geopotential-100",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-150": 
+            {"file_name": "geopotential-150",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-200": 
+            {"file_name": "geopotential-200",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-250": 
+            {"file_name": "geopotential-250",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-300": 
+            {"file_name": "geopotential-300",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-400": 
+            {"file_name": "geopotential-400",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-500": 
+            {"file_name": "geopotential-500",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-600": 
+            {"file_name": "geopotential-600",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-700": 
+            {"file_name": "geopotential-700",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-850": 
+            {"file_name": "geopotential-850",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+
+            "geopotential-925": 
+            {"file_name": "geopotential-925",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
+            
+            "geopotential-1000": 
+            {"file_name": "geopotential-1000",
+            "mean": 2.684756054804893e-06,
+            "std": 5.950411718913529e-07},
 
             "lat2d": 
             {"file_name": "lat2d",
@@ -206,8 +272,8 @@ class WeatherBenchDataset(th.utils.data.Dataset):
 
             "msl": 
             {"file_name": "msl",
-            "mean": 101142.36167036994,
-            "std": 1092.1791979406346},
+            "mean": 101141.42129534102,
+            "std": 1091.1232502005057},
 
             "stream250": 
             {"file_name": "stream250",
@@ -231,7 +297,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                 stats = half_manual
 
      
-        self.stats = half_manual_32 
+        self.stats = half_manual_32 #half_manual #
         print("DATA IS INITIALIZED AT FULL TRAIN SET")
         self.prognostic_variable_names_and_levels = prognostic_variable_names_and_levels
         self.prescribed_variable_names = prescribed_variable_names
@@ -257,7 +323,6 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         print(f"\tLoading dataset from {start_date} to {stop_date} into RAM...", sep=" ", end=" ", flush=True)
         a = time.time()
         # Load the data as xarray dataset
-        
         self.ds = xr.open_mfdataset(fpaths, engine=engine).sel(time=slice(start_date, stop_date, timedelta))
         
         # Chunk and load dataset to memory (distinguish between HEALPix, i.e., when "face" in coords, and LatLon mesh)
@@ -265,7 +330,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             chunkdict = dict(time=self.sequence_length+1, face=12, height=height, width=width)
         else:
             chunkdict = dict(time=self.sequence_length+1, lat=height, lon=width)
-        self.ds = self.ds.chunk(chunkdict).load()
+        self.ds = self.ds.chunk(chunkdict) #.load()
         print(f"took {time.time() - a} seconds")
         
         # Downscale dataset if desired

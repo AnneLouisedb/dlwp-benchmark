@@ -1,0 +1,81 @@
+activate dlwpbench environment
+/home/adboer/.conda/envs/dlwp-hpx/lib/python3.12/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+wandb: Using wandb-core as the SDK backend.  Please refer to https://wandb.me/wandb-core for more information.
+wandb: Currently logged in as: annelouisedeboer99 (annelouisedeboer99-university-of-amsterdam). Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.19.0
+wandb: Run data is saved locally in /gpfs/home6/adboer/dlwp-benchmark/src/dlwpbench/wandb/run-20250312_075755-zcxkuxut
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run glad-firefly-18
+wandb: ⭐️ View project at https://wandb.ai/annelouisedeboer99-university-of-amsterdam/Final%202.0%20Experiments
+wandb: 🚀 View run at https://wandb.ai/annelouisedeboer99-university-of-amsterdam/Final%202.0%20Experiments/runs/zcxkuxut
+
+Initializing model
+	Model mod_5.6_small_C1_fixed has 22001251 trainable parameters
+
+
+Initializing datasets
+DATA {'_target_': 'data.datasets.WeatherBenchDataset', 'type': 'WeatherBenchDataset', 'data_path': 'data/zarr/ERA5_2.0_hpx32/', 'engine': 'zarr', 'train_start_date': '1980-07-02', 'train_stop_date': '2020-12-31', 'val_start_date': '2021-01-01', 'val_stop_date': '2021-12-31', 'test_start_date': '2022-01-01', 'test_stop_date': '2024-02-29', 'timedelta': 1, 'init_dates': None, 'normalize': True, 'num_workers': 6, 'drop_last': True, 'height': 90, 'width': 180, 'degree': 2.0, 'sequence_length': 'None', 'downscale_factor': 1, 'context_size': '${model.context_size}', 'constant_names': ['orography', 'lsm', 'lat2d', 'lon2d'], 'prescribed_variable_names': ['tisr'], 'prognostic_variable_names_and_levels': {'msl': [], 'stream250': [], 'stream500': []}}
+using half?
+DATA IS INITIALIZED AT FULL TRAIN SET
+	Loading dataset from 1980-07-02 to 2020-12-31 into RAM... took 70.0293173789978 seconds
+context size 1
+statistics on dataset
+orography
+lsm
+lat2d
+lon2d
+tisr
+"mean": 0.2508859210090885,
+"std": 0.32323661025652123
+msl
+"mean": 101142.36167036994,
+"std": 1092.1791979406346
+
+stream250
+"mean": -749880.9128180227,
+"std": 66771987.291932374
+
+stream500
+"mean": -48478.47349296967,
+"std": 31118257.308523186
+
+DATA IS INITIALIZED AT FULL TRAIN SET
+	Loading dataset from 2021-01-01 to 2021-12-31 into RAM... took 54.77339005470276 seconds
+context size 1
+statistics on dataset
+orography
+lsm
+lat2d
+lon2d
+tisr
+"mean": 0.25088649527388057,
+"std": 0.3232343656366156
+msl
+"mean": 101155.41628349862,
+"std": 1143.0691657182633
+
+stream250
+"mean": -735655.1033784531,
+"std": 65895200.87989625
+
+stream500
+"mean": -45018.66951429212,
+"std": 30839799.270754907
+
+
+Start training.
+length of dataloader 232
+Start Validation
+LOSS PER TIMESTEP
+REMAPPING
+regridding data!
+Outputs:   0%|          | 0/18 [00:00<?, ?it/s]Outputs:  44%|████▍     | 8/18 [00:00<00:00, 76.50it/s]Outputs: 100%|██████████| 18/18 [00:00<00:00, 106.46it/s]
+wandb: WARNING Tried to log to step 232 that is less than the current step 235. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+Targets:   0%|          | 0/18 [00:00<?, ?it/s]Targets:  44%|████▍     | 8/18 [00:00<00:00, 77.37it/s]Targets: 100%|██████████| 18/18 [00:00<00:00, 107.21it/s]
+Spectral Divergence (87,) [ 2.55807886e-02  1.60598787e-02 -3.58876360e-02 -4.89367065e-03
+ -6.35585754e-03  2.82557699e-03  4.03947200e-03  5.59318987e-03
+  1.50741104e-03  8.24007997e-04  3.67657710e-04  5.77840252e-04
+ -2.35448868e-04  9.61512063e-05  1.24874286e-04  4.95729009e-05
+  9.88875346e-06  1.04496343e-04  7.88320504e-05  7.49700473e-06
+ -3.72420632e-05  1.09811187e-05 -4.05592472e-05  1.60968007e-07
