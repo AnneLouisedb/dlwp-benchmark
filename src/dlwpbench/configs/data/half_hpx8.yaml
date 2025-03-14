@@ -1,0 +1,63 @@
+_target_: data.datasets.WeatherBenchDataset
+type: WeatherBenchDataset
+data_path: data/zarr/ERA5_5.625_hpx8/
+engine: zarr
+train_start_date: 1979-01-01 
+train_stop_date: 2019-12-31
+val_start_date: 2020-01-01 
+val_stop_date: 2020-12-31
+test_start_date: 2021-01-01
+test_stop_date: 2022-12-31
+timedelta: 1 #Days between input steps
+init_dates: null
+normalize: true
+num_workers: 4 #2
+drop_last: true
+height: 90
+width: 180
+degree: 5.625
+sequence_length: None  # Overridden by training/validation/testing config
+downscale_factor: 1
+context_size: ${model.context_size}
+constant_names: 
+  - orography
+  - lsm   # land-sea mask
+  #- lat2d
+  #- lon2d
+prescribed_variable_names:
+  - tisr  # top of atmosphere incoming solar radiation
+prognostic_variable_names_and_levels:
+  msl: []
+  geopotential-1000: []
+  geopotential-925: []
+  geopotential-850: []
+  geopotential-700: []
+  geopotential-600: []
+  geopotential-500: []
+  geopotential-400: []
+  geopotential-300: []
+  geopotential-200: []
+  geopotential-250: []
+  geopotential-150: []
+  geopotential-100: []
+  geopotential-50: []
+
+
+
+  # geopotential-1000: []
+  # #geopotential-925: []
+  # geopotential-850: []
+  # #geopotential-700: []
+  # #geopotential-600: []
+  # geopotential-500: []
+  # #geopotential-400: []
+  # geopotential-300: []
+  # #geopotential-200: []
+  # geopotential-250: []
+  # #geopotential-150: []
+  # geopotential-100: []
+  # #geopotential-50: []
+  
+
+ 
+  

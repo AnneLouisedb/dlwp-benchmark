@@ -11,6 +11,65 @@ from models.convlstm.convlstm import ConvLSTMCell
 # File contains both a standard unet and modern unet with wide residual blocks
 
 
+# Complex multiplication 2d
+def batchmul2d(input, weights):
+    # (batch, in_channel, x,y ), (in_channel, out_channel, x,y) -> (batch, out_channel, x,y)
+    return th.einsum("bixy,ioxy->boxy", input, weights)
+
+class SpectralConv2d(th.nn.Module):
+    """2D Fourier layer. Does FFT, linear transform, and Inverse FFT.
+    Implemented in a way to allow multi-gpu training.
+    Args:
+        in_channels (int): Number of input channels
+        out_channels (int): Number of output channels
+        modes1 (int): Number of Fourier modes to keep in the first spatial direction
+        modes2 (int): Number of Fourier modes to keep in the second spatial direction
+    [paper](https://arxiv.org/abs/2010.08895)
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, modes1: int, modes2: int):
+        super().__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.modes1 = modes1  # Number of Fourier modes to multiply, at most floor(N/2) + 1
+        self.modes2 = modes2
+
+        self.scale = 1 / (in_channels * out_channels)
+        self.weights1 = th.nn.Parameter(
+            self.scale * th.rand(in_channels, out_channels, self.modes1, self.modes2, 2, dtype=th.float32)
+        )
+        self.weights2 = th.nn.Parameter(
+            self.scale * th.rand(in_channels, out_channels, self.modes1, self.modes2, 2, dtype=th.float32)
+        )
+
+    def forward(self, x, x_dim=None, y_dim=None):
+        batchsize = x.shape[0]
+        # Compute Fourier coeffcients up to factor of e^(- something constant)
+        x_ft = th.fft.rfft2(x)
+
+        # Multiply relevant Fourier modes
+        out_ft = th.zeros(
+            batchsize,
+            self.out_channels,
+            x.size(-2),
+            x.size(-1) // 2 + 1,
+            dtype=th.cfloat,
+            device=x.device,
+        )
+        out_ft[:, :, : self.modes1, : self.modes2] = batchmul2d(
+            x_ft[:, :, : self.modes1, : self.modes2], th.view_as_complex(self.weights1)
+        )
+        out_ft[:, :, -self.modes1 :, : self.modes2] = batchmul2d(
+            x_ft[:, :, -self.modes1 :, : self.modes2], th.view_as_complex(self.weights2)
+        )
+
+        # Return to physical space
+        x = th.fft.irfft2(out_ft, s=(x.size(-2), x.size(-1)))
+        return x
+
+
+
 class ModernUNet(th.nn.Module):
     """
     A ModernUNet implementation as by the PDE Refiner Paper.
@@ -96,10 +155,7 @@ class ModernUNet(th.nn.Module):
         # prognostic: [B, T, C, (F), H, W]
         if self.mesh == "healpix": B, _, _, F, _, _ = prognostic.shape
         outs = []
-        #if self.recurrent:
-        #    print('reset lstm block?')
-        #    self.decoder.lstm_block.reset()
-
+       
         for t in range(self.context_size, prognostic.shape[1]):
             # For each t I want to store the loss in an array, and see how the prediction skill decreases over time
           
@@ -133,7 +189,10 @@ class ModernUNet(th.nn.Module):
             out = self.decoder(x=enc2, skips=enc[::-1]) 
 
             if self.mesh == "healpix": out = einops.rearrange(out, "(b f) tc h w -> b tc f h w", b=B, f=F)
-            
+
+            print('out shape', out.shape)
+            print('prognostic', prognostic_t[:, -1].shape)
+
             out = prognostic_t[:, -1] + out
 
             
@@ -182,15 +241,32 @@ class MUNetHPX(ModernUNet):
         return: Tensor of shape [(B*F), (T*C), H, W] containing constants, prescribed, and prognostic/output variables
         """
         tensors = []
+        # shape of prognostic?
+        # torch.Size([16, 2, 3, 12, 8, 8])
+        # constants torch.Size([192, 4, 8, 8]) -> 4
+        # prescribed? torch.Size([192, 1, 8, 8]) -> 4 + 1 = 5
+        # shape prognostic? torch.Size([16, 1, 3, 12, 8, 8])
+        # rearrange? torch.Size([192, 3, 8, 8]) -> 5 + 3 = 8
+        # inptu shape? torch.Size([192, 8, 8, 8])
+        #######
+        # torch.Size([16, 2, 3, 12, 8, 8])
+        # constants torch.Size([192, 4, 8, 8])
+        # prescribed? torch.Size([192, 4, 8, 8]) -> PRESCRIBED IS NOT ADDED?
+        # shape prognostic? torch.Size([16, 1, 3, 12, 8, 8])
+        # rearrange? torch.Size([192, 3, 8, 8])
+        # inptu shape? torch.Size([192, 7, 8, 8])
         if constants is not None: tensors.append(einops.rearrange(constants[:, 0], "b c f h w -> (b f) c h w"))
         if prescribed is not None: tensors.append(einops.rearrange(prescribed, "b t c f h w -> (b f) (t c) h w"))
         if prognostic is not None:
             if prognostic.ndim == 6:
-                tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w"))
+               
+                tensors.append(einops.rearrange(prognostic, "b t c f h w -> (b f) (t c) h w")) 
             elif prognostic.ndim == 5:
                 tensors.append(einops.rearrange(prognostic, "b t c h w -> b (t c) h w"))
- 
-        return th.cat(tensors, dim=1)
+
+        out = th.cat(tensors, dim=1)
+        
+        return out
     
     
             
@@ -382,7 +458,7 @@ class UNetEncoder(th.nn.Module):
                         in_channels=c_in if n_conv == 0 else c_out,
                         out_channels=c_out, 
                         kernel_size=3, 
-                        padding=0
+                        padding=1 
                     ))
                 elif mesh == "healpix":
                     layer.append(HEALPixLayer(
@@ -498,15 +574,16 @@ class ModernUNetEncoder(th.nn.Module):
 
         channels = [in_channels] + hidden_channels
 
+
         for c_idx in range(len(channels[:-1])):
             layer = []
             c_in = channels[c_idx]
             c_out = channels[c_idx+1]
 
             # Apply downsampling prior to convolutions if not in top-most layer
-            
             if c_idx > 0: layer.append(th.nn.Conv2d(c_in, c_in, (3, 3), (2, 2), (1, 1)))
-            #if c_idx > 0: layer.append(th.nn.AvgPool2d(kernel_size=2, stride=2, padding=0))
+            if c_idx == 0: layer.append(th.nn.Conv2d(c_in, c_in, (1, 1), (1, 1), (0, 0)))
+            # STORE THIS OUTPUT
             if mesh == "equirectangular":
                 #layer.append(CylinderPad(padding=1))
                 # (1) norm (2) activation (3) convolution
@@ -516,6 +593,8 @@ class ModernUNetEncoder(th.nn.Module):
                     out_channels=c_out,
                     kernel_size= 3,
                     padding = 1))
+                
+                
                   
                 # (4) Attention
                 layer.append(self.attn)
@@ -526,9 +605,11 @@ class ModernUNetEncoder(th.nn.Module):
                     in_channels=c_in,
                     out_channels=c_out,
                     kernel_size= 3,
-                    padding = 1,
+                    padding = 0, 
                     mesh=mesh
                     ))
+                
+                # STORE THIS OUTPUT
                 
                 layer.append(self.attn)
                     
@@ -541,8 +622,14 @@ class ModernUNetEncoder(th.nn.Module):
         # Store intermediate model outputs (per layer) for skip connections
         outs = []
         for layer in self.layers:
-            x = layer(x)
-            outs.append(x)
+            for sublayer in layer:
+                x = sublayer(x)
+                
+                if isinstance(sublayer, (ResidualBlock, HEALPixLayer)):
+                    outs.append(x)
+                    
+
+
         return outs
     
 class ModernUNetDecoder(th.nn.Module):
@@ -558,6 +645,7 @@ class ModernUNetDecoder(th.nn.Module):
     ):
         super(ModernUNetDecoder, self).__init__()
         self.layers = []
+        final_out = 2*hidden_channels[0] 
         hidden_channels = hidden_channels[::-1]  # Invert as we go up in decoder, i.e., from bottom to top layers
         self.attn = th.nn.Identity() # attention is not yet implemented
         self.activation = activation
@@ -570,14 +658,6 @@ class ModernUNetDecoder(th.nn.Module):
             c_in = hidden_channels[c_idx]
             c_out = hidden_channels[c_idx]
 
-            # # Determine the height and width for this layer
-            if c_idx == 0:
-                height_x, width_x = 8, 8
-            elif c_idx == 1:
-                height_x, width_x = 4, 4
-            else:
-                height_x, width_x = 2, 2
-            
             c_in_ = c_in if c_idx == 0 else 2*hidden_channels[c_idx]  # Skip connection from encoder
             if mesh == "equirectangular":
                 layer.append(ResidualBlock(
@@ -592,8 +672,8 @@ class ModernUNetDecoder(th.nn.Module):
                     layer=ResidualBlock,
                     in_channels=c_in_,
                     out_channels=c_out,
-                    kernel_size=3,
-                    padding=1,
+                    kernel_size=3, 
+                    padding=0, 
                     mesh = mesh
                 ))
                 layer.append(self.attn)
@@ -603,8 +683,8 @@ class ModernUNetDecoder(th.nn.Module):
                 batch_size=32*12,
                 input_size=c_out,
                 hidden_size=c_out,
-                height=2, #height_x,
-                width=2, #width_x,
+                height=2, 
+                width=2, 
                 device='cuda:0',
                 bias=True,
                 mesh='healpix'
@@ -622,18 +702,28 @@ class ModernUNetDecoder(th.nn.Module):
                 
                 layer.append(self.lstm_block)
 
+            if mesh == "healpix":
+                if c_idx + 1 < len(hidden_channels):
+                    c_out2 = 2*hidden_channels[c_idx+1]
+                else:
+                    c_out2 = 2*hidden_channels[c_idx]
+
+                layer.append(HEALPixLayer(
+                        layer=ResidualBlock,
+                        in_channels=c_out,
+                        out_channels=c_out2,
+                        kernel_size=3, 
+                        padding=0, # 1
+                        mesh = mesh
+                    ))
+
                 
             # Apply upsampling if not in top-most layer
             if c_idx < len(hidden_channels)-1: 
-                layer.append(th.nn.ConvTranspose2d(c_out, hidden_channels[c_idx+1], (4, 4), (2, 2), (1, 1)))
-                # layer.append(th.nn.ConvTranspose2d(
-                #     in_channels=c_out,
-                #     out_channels=hidden_channels[c_idx+1],
-                #     kernel_size=2,
-                #     stride=2
-                #     #kernel_size=3, # see pdf refiner paper
-                # ))
-
+                #layer.append(th.nn.ConvTranspose2d(c_out2, c_out2, (4, 4), (1, 1), (2, 2))) # old
+                # size doubles!!
+                layer.append(th.nn.ConvTranspose2d(c_out2, c_out2, (4, 4), (2, 2), (1, 1))) 
+             
             self.layers.append(th.nn.Sequential(*layer))
 
         self.layers = th.nn.ModuleList(self.layers)
@@ -641,21 +731,35 @@ class ModernUNetDecoder(th.nn.Module):
         
         # Add linear output layer
         self.output_layer = zero_module(th.nn.Conv2d(
-            in_channels=c_out,
+            in_channels=c_out2,
             out_channels=out_channels,
             kernel_size=1 
         ))
 
-        self.final_norm = th.nn.GroupNorm(8, c_out)
+        self.final_norm = th.nn.GroupNorm(8, final_out)
 
     def forward(self, x: th.Tensor, skips: list) -> th.Tensor:
-        
-        for l_idx, layer in enumerate(self.layers):
-            x = th.cat([skips[l_idx], x], dim=1) if l_idx > 0 else x
-            x = layer(x)
-        return self.output_layer(self.activation(self.final_norm(x)))
-         
+           # Ensure that the skips are provided in reverse order (bottom to top)
+            skips = skips[::-1]
 
+            # Loop through each decoder layer
+            for l_idx, layer in enumerate(self.layers):
+                for block_idx, submodule in enumerate(layer):
+                   
+                    # Apply skip connection at the block level
+                    if isinstance(submodule, ResidualBlock) and l_idx < len(skips):
+                        s = skips[l_idx]  # Get corresponding skip connection
+                        x = th.cat([s, x], dim=1)  # Concatenate skip connection with current feature map
+                    
+                    # Pass through the current submodule/block
+                    x = submodule(x)
+                    
+                   
+                    
+
+            # Apply final normalization, activation, and output layer
+            return self.output_layer(self.activation(self.final_norm(x)))
+    
 # BLOCKS
     
 def zero_module(module):
@@ -671,6 +775,65 @@ class AttentionBlockl(th.nn.Module):
         super().__init__()
    
         pass
+
+
+class FourierResidualBlock(th.nn.Module):
+    """Fourier Residual Block to be used in modern Unet architectures.
+
+    Args:
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        modes1 (int): Number of modes in the first dimension.
+        modes2 (int): Number of modes in the second dimension.
+        activation (str): Activation function to use.
+        norm (bool): Whether to use normalization.
+        n_groups (int): Number of groups for group normalization.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        modes1: int = 16,
+        modes2: int = 16,
+        activation = th.nn.GELU(),
+        norm: bool = False,
+        n_groups: int = 1,
+    ):
+        super().__init__()
+        self.activation = activation
+        self.modes1 = modes1
+        self.modes2 = modes2
+
+        self.fourier1 = SpectralConv2d(in_channels, out_channels, modes1=self.modes1, modes2=self.modes2)
+        self.conv1 = th.nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, padding_mode="zeros")
+        self.fourier2 = SpectralConv2d(out_channels, out_channels, modes1=self.modes1, modes2=self.modes2)
+        self.conv2 = th.nn.Conv2d(out_channels, out_channels, kernel_size=1, padding=0, padding_mode="zeros")
+        # If the number of input channels is not equal to the number of output channels we have to
+        # project the shortcut connection
+        if in_channels != out_channels:
+            self.shortcut = th.nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
+        else:
+            self.shortcut = th.nn.Identity()
+
+        if norm:
+            self.norm1 = th.nn.GroupNorm(n_groups, in_channels)
+            self.norm2 = th.nn.GroupNorm(n_groups, out_channels)
+        else:
+            self.norm1 = th.nn.Identity()
+            self.norm2 = th.nn.Identity()
+
+    def forward(self, x: th.Tensor):
+        # using pre-norms
+        h = self.activation(self.norm1(x))
+        x1 = self.fourier1(h)
+        x2 = self.conv1(h)
+        out = x1 + x2
+        out = self.activation(self.norm2(out))
+        x1 = self.fourier2(out)
+        x2 = self.conv2(out)
+        out = x1 + x2 + self.shortcut(x)
+        return out
 
 
 class ResidualBlock(th.nn.Module):
@@ -691,7 +854,7 @@ class ResidualBlock(th.nn.Module):
         out_channels: int,
         activation =  th.nn.GELU(),
         norm: bool = False,
-        n_groups: int = 8,
+        n_groups: int = 1,
         kernel_size = 3,
         padding = 1,
         mesh = None
@@ -716,7 +879,7 @@ class ResidualBlock(th.nn.Module):
         # If the number of input channels is not equal to the number of output channels we have to
         # project the shortcut connection
         if in_channels != out_channels:
-            self.shortcut = th.nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1) ) 
+            self.shortcut = th.nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1)) 
         else:
             self.shortcut = th.nn.Identity()
 
@@ -934,4 +1097,4 @@ if __name__ == "__main__":
 
     x = th.randn(4, 25, in_channels, 32, 64)  # B, T, C, H, W
     y_hat = model(x=x, teacher_forcing_steps=teacher_forcing_steps)
-    print(y_hat.shape)
+    

@@ -17,43 +17,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
 
     # Statistics are computed over the training period from 1979-01-01 to 2014-12-31 using the
     # self._compute_statistics() of this class
-    STATISTICS = {
-       
-        
-        'msl': {"file_name": "msl",
-            "mean": 100958.9342887361, "std": 1302.149826386961},
-        'sst': {"file_name": "sst",
-            "mean": 290.31263675008245,"std": 11.372437606024592}
-        ,
-        'stream250': {"file_name": "stream250", "mean": 3279301.066678744, "std": 88087550.26655602},
-        'stream500':  {"file_name": "stream500", "mean": 2355273.207031221,  "std": 42371255.252134465},
-        "tisr": {
-            "file_name": "toa_incident_solar_radiation",
-            "mean": 1074504.8,
-            "std": 1439846.4
-        },
-        "orography": {
-            "file_name": "constants",
-            "mean": 379.4976,
-            "std": 859.87225
-        },
-        "lsm": {
-            "file_name": "constants",
-            "mean": 0,  # Do not normalize since it is in [0, 1] already
-            "std": 1
-        },
-        "lat2d": {
-            "file_name": "constants",
-            "mean": 0,
-            "std": 51.936146191742026
-        },
-        "lon2d": {
-            "file_name": "constants",
-            "mean": 177.1875,
-            "std": 103.9103617607503
-        }
-    }
-
+  
     def __init__(
             self,
             data_path: str,
@@ -189,7 +153,6 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             "mean": 0,
             "std": 1},
 
-            # TO DO !
             "geopotential-50": 
             {"file_name": "geopotential-50",
             "mean": 2.684756054804893e-06,
@@ -314,9 +277,11 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         # Get paths to all (yearly) netcdf/zarr files
         fpaths = []
         for p in prognostic_variable_names_and_levels:
-            fpaths += glob.glob(os.path.join(data_path, self.stats[p]["file_name"], "*"))
+            prog = glob.glob(os.path.join(data_path, self.stats[p]["file_name"], "*"))
+            fpaths += prog
         for p in prescribed_variable_names:
-            fpaths += glob.glob(os.path.join(data_path, self.stats[p]["file_name"], "*"))
+            pres =  glob.glob(os.path.join(data_path, self.stats[p]["file_name"], "*"))
+            fpaths += pres
         if constant_names: 
             fpaths += glob.glob(os.path.join(data_path, "constants", "*"))
 
@@ -330,7 +295,8 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             chunkdict = dict(time=self.sequence_length+1, face=12, height=height, width=width)
         else:
             chunkdict = dict(time=self.sequence_length+1, lat=height, lon=width)
-        self.ds = self.ds.chunk(chunkdict) #.load()
+        self.ds = self.ds.chunk(chunkdict).load()
+        
         print(f"took {time.time() - a} seconds")
         
         # Downscale dataset if desired
@@ -351,8 +317,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
             self.constants = th.nan  # Dummy tensor is returned if no constants are used
 
         print('context size', self.context_size)
-        print('statistics on dataset')
-
+       
         self.statistics = self.compute_statistics()
         
     def __len__(self):
@@ -374,6 +339,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         if self.prescribed_variable_names:
             prescribed = []
             for p in self.prescribed_variable_names:
+                
                 manual_tisr = False
                 if self.init_dates is None:
                     lazy_data = self.ds[p].isel(time=slice(item, item+self.sequence_length))
@@ -401,9 +367,11 @@ class WeatherBenchDataset(th.utils.data.Dataset):
                         date = date.replace(year=year_rep, day=28) if date.month == 2 and date.day > 28 else date.replace(year=year_rep)
                         tmp.append(self.ds.tisr.sel(time=date).values)
                     lazy_data = np.concatenate((lazy_data, np.array(tmp)))
-                    #print(lazy_data)
+                    
                 if self.normalize: lazy_data = (lazy_data-self.stats[p]["mean"])/self.stats[p]["std"]
+                
                 prescribed.append(lazy_data.compute() if not manual_tisr else lazy_data)  # Loads data into memory
+            
             prescribed = np.float32(np.stack(prescribed, axis=1))
            
         else:
@@ -414,8 +382,7 @@ class WeatherBenchDataset(th.utils.data.Dataset):
         for p in self.prognostic_variable_names_and_levels:
             if self.init_dates is None:
                 lazy_data = self.ds[p].isel(time=slice(item, item+self.sequence_length+1)) # loads one more time step (output)
-                # print("lazy data time (prognostic) - input vector from dataloader")   
-                # print(lazy_data.time)
+              
             else:
                 lazy_data = self.ds[p].sel(
                     time=slice(self.init_dates[item],

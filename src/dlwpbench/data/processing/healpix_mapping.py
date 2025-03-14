@@ -150,13 +150,14 @@ class HEALPixRemap():
 
         # Load .nc file in latlon format
         ds_ll = xr.open_dataset(file_path, engine="zarr" if "zarr" in file_path else "netcdf4")
-
+        print("drop level!")
+        ds_ll = ds_ll.drop_vars('level')
         if times is not None: ds_ll = ds_ll.sel({"time": times})
 
         # Set up coordinates and chunksizes for the HEALPix dataset
         coords = {}
         if "time" in list(ds_ll.coords): coords["time"] = ds_ll.coords["time"]
-       # if "level" in list(ds_ll.coords): coords["level"] = ds_ll.coords["level"]
+        # if "level" in list(ds_ll.coords): coords["level"] = ds_ll.coords["level"]
         coords["face"] = np.array(range(12), dtype=np.int64)
         coords["height"] = np.array(range(self.nside), dtype=np.int64)
         coords["width"] = np.array(range(self.nside), dtype=np.int64)
@@ -239,6 +240,7 @@ class HEALPixRemap():
         if dst_path is not None:
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             if self.verbose: print("Dataset sucessfully built. Writing data to file...")
+            
             ds_hpx.to_netcdf(dst_path) if ".nc" in dst_path else ds_hpx.to_zarr(dst_path)
         return ds_hpx
 
@@ -588,24 +590,20 @@ def project_ll_to_hpx(
         nside=nside,
         resolution_factor=resolution_factor
     )
+    
+    #file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_1.0", vname, f"*.{extension}")))
+    file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_5.625", vname, f"*.{extension}")))
+    #file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_2.0", vname, f"*.{extension}")))
 
-    file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_1.0", vname, f"*.{extension}")))
-    #file_paths_ll = np.sort(glob.glob(os.path.join("data", file_format, "ERA5_5.625", vname, f"*.{extension}")))
-    deg = 1.0 #
-    print(os.path.join("data", file_format, "ERA5_1.0", vname, f"*.{extension}"))
+    deg = 5.625 #1.0 #
+
+
     for file_path_ll in file_paths_ll:
         filename = os.path.basename(file_path_ll)
         print(f"Working on {filename}")
         if vname == "constants":
             curr_dst_path = os.path.join(dst_path, f"constants_hpx{nside}_{deg}deg.{extension}")
-        # elif vname =='stream':
-        #     curr_dst_path = os.path.join(dst_path, f"stream_hpx{nside}_{deg}deg.{extension}")
-
-        # elif vname == 'latitude_weights':
-        #     curr_dst_path = os.path.join(dst_path, f"latitude_weights_1.0deg.{extension}")
-        #     file_path_ll = '/home/adboer/dlwp-benchmark/src/dlwpbench/latitude_weights.nc'
-        #     remapper.remap(file_path=file_path_ll, poolsize=poolsize, dst_path=curr_dst_path, const=True)
-
+       
         else:
             year = int(re.search(r'(19|20)\d{2}', filename).group(0))
             curr_dst_path = os.path.join(dst_path, f"{vname}_{year}_hpx{nside}_{deg}deg.{extension}")
@@ -618,17 +616,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Projection class from LatLon to HEALPix and reverse. Calling this script with a variable_name as "
                     "-v argument invokes the conversion of the respective files from LatLon to HEALPix.")
-    parser.add_argument("-v", "--variable-name", type=str, default="stream500",
+    parser.add_argument("-v", "--variable-name", type=str, default="geopotential-500",
                         help="The variable to be converted, for example '2m_temperature' or 'geopotential'.")
-    parser.add_argument("--latitudes", type=int, default =180) # 32
-    parser.add_argument("--longitudes", type=int, default=360) #, #64)
-    parser.add_argument("-n", "--nside", type=int, default=64, #8,
-                        help="The resolution of the faces of the HEALPix faces.")
+    parser.add_argument("--latitudes", type=int, default =180) #90) #32) #180) # 32
+    parser.add_argument("--longitudes", type=int, default=360) #180) #64) #360) #, #64)
+    parser.add_argument("-n", "--nside", type=int, default=8, #8
+                        help="The resolution of the faces of the HEALPix faces.") #64, #8,
     parser.add_argument("-r", "--resolution-factor", type=float, default=1.0,
                         help=("Can be required when the resolution of the original data is too coarse for the target "
                               "HEALPix resolution. Must be chosen carefully, as it can introduce shifts!"))
-    parser.add_argument("-f", "--file-format", type=str, default="zarr",
-                        help="The file format of the source and target data. Can be either 'zarr' or 'netcdf'.")
+    parser.add_argument("-f", "--file-format", type=str, default="netcdf", 
+                        help="The file format of the source and target data. Can be either 'zarr' or 'netcdf'.") #zarr",
 
     run_args = parser.parse_args()
 
