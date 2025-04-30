@@ -1,0 +1,4 @@
+batch_size: 16 #1000
+noise: 0.0
+sequence_length: 48   # 46 + context variables
+dataset_name: ${data.test_set_name}

@@ -1,0 +1,16 @@
+type: DiffModernUNet
+name: modern_unet_pde_refiner
+constant_channels: 2
+prescribed_channels: 1
+prognostic_channels: 14  
+hidden_channels: [64, 128, 256, 1024] 
+activation: th.nn.GELU()  
+context_size: 2 
+norm: true 
+use_scale_shift_norm: true 
+num_refinement_step: 5
+mesh: "healpix"
+backbone: False
+        
+
+

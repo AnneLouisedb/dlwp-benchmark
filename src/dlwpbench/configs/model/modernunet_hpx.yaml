@@ -1,0 +1,15 @@
+type: MUNetHPX
+name: modern_unet_pde
+constant_channels: 2
+prescribed_channels: 1
+prognostic_channels: 14
+hidden_channels: [64, 128, 256, 1024] 
+activation: th.nn.GELU()  
+context_size: 2
+norm: true
+mesh: 'healpix'
+attention: false
+recurrent: false
+dropout: 0.1
+
+

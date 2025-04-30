@@ -1,0 +1,13 @@
+type: ConvLSTMHPX # ConvLSTM
+name: test
+batch_size: ${training.batch_size}
+constant_channels: 2
+prescribed_channels: 1
+prognostic_channels: 14
+hidden_sizes: [128,128,128]
+height: 32 #${data.height}
+width: 32 #${data.width}
+device: ${device}
+bias: true
+context_size: 2
+mesh: 'healpix' 

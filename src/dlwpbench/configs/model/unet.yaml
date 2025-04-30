@@ -1,0 +1,10 @@
+type: UNetHPX
+name: KarlbauerUnet
+constant_channels: 2
+prescribed_channels: 1
+prognostic_channels: 14 
+hidden_channels: [32, 64, 128, 512] 
+n_convolutions: 2
+activation: th.nn.ReLU()
+context_size: 1
+mesh: healpix

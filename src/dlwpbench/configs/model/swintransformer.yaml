@@ -1,0 +1,26 @@
+type: SwinTransformerHPX
+name: test
+context_size: 1
+img_height: 32 #8 #${data.height}
+img_width: 32 ## 8 #${data.width}
+patch_size: 1
+constant_channels: 2
+prescribed_channels: 1
+prognostic_channels: 14 
+embed_dim: 128 # 17 #
+#depths: [2, 2, 6, 2]
+#num_heads: [3, 6, 12, 24]
+depths: [4, 4, 4, 4]
+num_heads: [4, 4, 4, 4]
+mlp_ratio: 4
+qkv_bias: True
+qk_scale: null
+drop_rate: 0.
+attn_drop_rate: 0.
+drop_path_rate: 0.2
+norm_layer: nn.LayerNorm
+ape: False
+patch_norm: True
+frozen_stages: -1
+use_checkpoint: False
+mesh: healpix
