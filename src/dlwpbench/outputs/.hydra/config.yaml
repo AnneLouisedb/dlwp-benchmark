@@ -1,0 +1,96 @@
+device: cuda:0
+verbose: true
+seed: 1234
+training:
+  epochs: 600
+  type: diffusion
+  learning_rate: 0.0001
+  clip_gradients: true
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  noise: 0.0
+  sequence_length: 2
+  save_model: false
+  continue_training: false
+  dataset_name: ${data.training_set_name}
+  num_refinement_steps: 50
+  min_noise_std: 0.001
+  predict_difference: true
+  optimizer_weight_decay: 1.0e-05
+  input_perturbation: false
+  flow_matching: false
+  ACDM: true
+  arches: false
+  difference_weight: 0.3
+  backbone_checkpoint_path: /home/adboer/dlwp-benchmark/src/dlwpbench/outputs/C1T1D01PDErefhpx321239/checkpoints/C1T1D01PDErefhpx321239_best.ckpt
+validation:
+  batch_size: 64
+  gradient_accumulation_steps: 1
+  noise: 0.0
+  sequence_length: 14
+  dataset_name: ${data.validation_set_name}
+testing:
+  batch_size: 1000
+  noise: 0.08
+  sequence_length: 48
+  dataset_name: ${data.test_set_name}
+data:
+  _target_: data.datasets.WeatherBenchDataset
+  type: WeatherBenchDataset
+  data_path: /projects/prjs1254/WeatherBench_hpx32/
+  engine: zarr
+  train_start_date: '1990-01-01'
+  train_stop_date: '2019-12-31'
+  val_start_date: '2020-01-01'
+  val_stop_date: '2020-12-31'
+  test_start_date: '2021-01-01'
+  test_stop_date: '2022-12-31'
+  timedelta: 1
+  init_dates: null
+  normalize: true
+  num_workers: 1
+  drop_last: true
+  height: 90
+  width: 180
+  degree: 2.0
+  sequence_length: None
+  downscale_factor: 1
+  channel_weights: false
+  context_size: ${model.context_size}
+  constant_names:
+  - orography
+  - lsm
+  prescribed_variable_names:
+  - tisr
+  prognostic_variable_names_and_levels:
+    msl: []
+    z-1000: []
+    z-925: []
+    z-850: []
+    z-700: []
+    z-600: []
+    z-500: []
+    z-400: []
+    z-300: []
+    z-200: []
+    z-250: []
+    z-150: []
+    z-100: []
+model:
+  type: DiffMUNetHPX
+  name: ''
+  constant_channels: 2
+  prescribed_channels: 1
+  prognostic_channels: 13
+  hidden_channels:
+  - 128
+  - 128
+  - 256
+  - 1024
+  activation: th.nn.GELU()
+  context_size: 1
+  norm: true
+  use_scale_shift_norm: true
+  num_refinement_step: 50
+  mesh: healpix
+  backbone: false
